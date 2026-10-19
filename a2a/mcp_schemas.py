@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from .cstp.models import MAX_CONTEXT_CHARS, MAX_TEXT_CHARS
+
 
 class QueryFiltersInput(BaseModel):
     """Optional filters for narrowing decision queries."""
@@ -85,6 +87,7 @@ class CheckActionInput(BaseModel):
     description: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Description of the action you intend to take",
     )
     category: str | None = Field(
@@ -125,6 +128,7 @@ class ReasonInput(BaseModel):
     text: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Explanation of this reason",
     )
 
@@ -198,6 +202,7 @@ class LogDecisionInput(BaseModel):
     decision: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="What you decided — state the choice, not the question",
     )
     confidence: float = Field(
@@ -216,6 +221,7 @@ class LogDecisionInput(BaseModel):
     )
     context: str | None = Field(
         default=None,
+        max_length=MAX_CONTEXT_CHARS,
         description="Situation context — what led to this decision",
     )
     reasons: list[ReasonInput] | None = Field(
@@ -446,6 +452,7 @@ class PreActionActionInput(BaseModel):
     description: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Description of the action you intend to take",
     )
     category: str | None = Field(
@@ -506,6 +513,7 @@ class PreActionInput(BaseModel):
     )
     pattern: str | None = Field(
         default=None,
+        max_length=MAX_TEXT_CHARS,
         description="Abstract pattern this action represents",
     )
     agent_id: str | None = Field(

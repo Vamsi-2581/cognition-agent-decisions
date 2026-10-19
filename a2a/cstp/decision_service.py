@@ -15,6 +15,7 @@ from typing import Any
 import yaml
 
 from .embeddings.factory import get_embedding_provider
+from .models import MAX_CONTEXT_CHARS, MAX_TEXT_CHARS
 from .storage.factory import get_decision_store
 from .vectordb.factory import get_vector_store
 
@@ -539,9 +540,28 @@ class RecordDecisionRequest:
             agent_id=agent_id,
         )
 
+    def length_errors(self) -> list[str]:
+        """Return errors for free-text fields over their caps (see models.py).
+
+        Split out from validate() for the pre_action auto-record path, which
+        must enforce the caps without newly rejecting categories or stakes it
+        has always accepted.
+        """
+        errors = []
+        if self.decision and len(self.decision) > MAX_TEXT_CHARS:
+            errors.append(f"decision: must be at most {MAX_TEXT_CHARS} characters")
+        if self.context and len(self.context) > MAX_CONTEXT_CHARS:
+            errors.append(f"context: must be at most {MAX_CONTEXT_CHARS} characters")
+        if self.pattern and len(self.pattern) > MAX_TEXT_CHARS:
+            errors.append(f"pattern: must be at most {MAX_TEXT_CHARS} characters")
+        for i, reason in enumerate(self.reasons):
+            if reason.text and len(reason.text) > MAX_TEXT_CHARS:
+                errors.append(f"reasons[{i}].text: must be at most {MAX_TEXT_CHARS} characters")
+        return errors
+
     def validate(self) -> list[str]:
         """Validate the request. Returns list of errors."""
-        errors = []
+        errors = self.length_errors()
 
         if not self.decision or not self.decision.strip():
             errors.append("decision: required field")

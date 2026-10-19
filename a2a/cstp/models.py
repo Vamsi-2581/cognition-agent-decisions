@@ -4,6 +4,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+# Upper bounds on caller-supplied free text. Recording runs regex bridge
+# extraction synchronously on the (single-worker) event loop, so an unbounded
+# field let one request stall every other caller. MAX_TEXT_CHARS applies to the
+# decision / action description, the pattern, and each reason's text.
+MAX_TEXT_CHARS = 10_000
+MAX_CONTEXT_CHARS = 50_000
+
 
 @dataclass(slots=True)
 class QueryFilters:
@@ -231,6 +238,10 @@ class ActionContext:
         description = data.get("description", "")
         if not description:
             raise ValueError("Missing required field: action.description")
+        if len(description) > MAX_TEXT_CHARS:
+            raise ValueError(
+                f"action.description: must be at most {MAX_TEXT_CHARS} characters"
+            )
 
         known_fields = {"description", "category", "stakes", "confidence", "context"}
         extra = {k: v for k, v in data.items() if k not in known_fields}

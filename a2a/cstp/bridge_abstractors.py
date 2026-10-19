@@ -33,8 +33,10 @@ _STRIP_PATTERNS = [
     (r"\bv?\d+\.\d+(\.\d+)?\b", "vX.Y"),
     (r"\b\d{4}-\d{2}-\d{2}\b", "DATE"),
     (r"\b\d+\b", "N"),
-    # File paths and module names
-    (r"[a-z_]+/[a-z_/]+\.[a-z]+", "a file"),
+    # File paths and module names. The lookbehind stops the engine from retrying
+    # at every character inside a long path-like run: `[a-z_]+/[a-z_/]+\.[a-z]+`
+    # rescanned the rest of the run from each start, quadratic in its length.
+    (r"(?<![a-z_/])/?[a-z_]+(?:/[a-z_]+)+\.[a-z]+", "a file"),
     (r"`[^`]+`", "a component"),
     # Specific project names (common patterns)
     (r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b", "a component"),  # CamelCase

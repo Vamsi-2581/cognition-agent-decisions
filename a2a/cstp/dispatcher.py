@@ -1401,14 +1401,15 @@ async def _handle_record_decision(params: dict[str, Any], agent_id: str) -> dict
         decision_id=client_decision_id,
     )
 
+    # Validate before bridge extraction, which runs regexes over the raw text.
+    errors = request.validate()
+    if errors:
+        raise ValueError(f"Validation failed: {'; '.join(errors)}")
+
     # F027 P2: Smart bridge extraction (replaces F024 Phase 3)
     from .bridge_hook import maybe_smart_extract_bridge
 
     bridge_auto, bridge_method = await maybe_smart_extract_bridge(request)
-
-    errors = request.validate()
-    if errors:
-        raise ValueError(f"Validation failed: {'; '.join(errors)}")
 
     # Record the decision
     response = await record_decision(request)

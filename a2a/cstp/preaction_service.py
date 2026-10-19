@@ -253,6 +253,13 @@ async def pre_action(
                 deliberation=record_req.deliberation,
             )
 
+            # Enforce the text caps before bridge extraction, which runs regexes
+            # over the raw text; reasons and pattern arrive here unchecked from
+            # cstp.preAction.
+            errors = record_req.length_errors()
+            if errors:
+                raise ValueError(f"Validation failed: {'; '.join(errors)}")
+
             # F027 P2: Smart bridge extraction
             from .bridge_hook import maybe_smart_extract_bridge
 
