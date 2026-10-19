@@ -1,6 +1,7 @@
 """Unit tests for decision_service.py."""
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -17,6 +18,8 @@ from a2a.cstp.decision_service import (
     record_decision,
     write_decision_file,
 )
+from a2a.cstp.embeddings import EmbeddingProvider
+from a2a.cstp.embeddings.factory import set_embedding_provider
 
 
 class TestGenerateDecisionId:
@@ -410,12 +413,14 @@ class TestRecordDecision:
             category="process",
         )
 
-        # With no ChromaDB/Gemini, indexing will fail but file should be saved
+        failing = AsyncMock(spec=EmbeddingProvider)
+        failing.embed.side_effect = RuntimeError("embedding service unavailable")
+        set_embedding_provider(failing)
+
         response = await record_decision(req, decisions_path=str(tmp_path))
 
         assert response.success is True
         assert Path(response.path).exists()
-        # indexed should be False since no ChromaDB available
         assert response.indexed is False
 
 
