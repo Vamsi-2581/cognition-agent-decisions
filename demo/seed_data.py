@@ -6,11 +6,17 @@ with varying confidence, outcomes, and intentional miscalibration
 to make the dashboard interesting from the start.
 """
 
+import ast
 import json
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# The server's SQLite store. Its schema is read from the source rather than
+# imported: importing `a2a` pulls in FastAPI, and this script runs before
+# anything is installed (see demo/README.md).
+STORE_MODULE = Path(__file__).resolve().parent.parent / "a2a" / "cstp" / "storage" / "sqlite.py"
 
 # Realistic demo decisions organized by category
 DECISIONS = [
@@ -495,71 +501,38 @@ GRAPH_EDGES = [
 ]
 
 
+def load_store_schema() -> str:
+    """Return SCHEMA_SQL from the server's SQLite store module.
+
+    A hand-copied schema drifted (no created_at column), and the server then
+    failed to open the seeded database. Reading the literal keeps the two equal.
+    """
+    tree = ast.parse(STORE_MODULE.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "SCHEMA_SQL" for t in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise RuntimeError(f"SCHEMA_SQL not found in {STORE_MODULE}")
+
+
 def create_database(db_path: str) -> None:
-    """Create a SQLite database with seed data."""
+    """Create a SQLite database with seed data, plus graph_edges.jsonl beside it."""
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-
-    # Create tables matching our schema
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS decisions (
-            id TEXT PRIMARY KEY,
-            decision TEXT NOT NULL,
-            confidence REAL NOT NULL,
-            category TEXT NOT NULL,
-            stakes TEXT DEFAULT 'medium',
-            context TEXT,
-            date TEXT NOT NULL,
-            outcome TEXT,
-            result TEXT,
-            lessons TEXT,
-            reviewed INTEGER DEFAULT 0,
-            reviewed_at TEXT,
-            recorded_by TEXT DEFAULT 'demo-agent',
-            pattern TEXT,
-            quality_score REAL,
-            feature TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS decision_tags (
-            decision_id TEXT NOT NULL,
-            tag TEXT NOT NULL,
-            FOREIGN KEY (decision_id) REFERENCES decisions(id),
-            UNIQUE(decision_id, tag)
-        );
-
-        CREATE TABLE IF NOT EXISTS decision_reasons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            decision_id TEXT NOT NULL,
-            type TEXT NOT NULL,
-            text TEXT NOT NULL,
-            strength REAL DEFAULT 1.0,
-            FOREIGN KEY (decision_id) REFERENCES decisions(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS decision_bridge (
-            decision_id TEXT PRIMARY KEY,
-            structure TEXT,
-            function TEXT,
-            FOREIGN KEY (decision_id) REFERENCES decisions(id)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_decisions_category ON decisions(category);
-        CREATE INDEX IF NOT EXISTS idx_decisions_date ON decisions(date);
-        CREATE INDEX IF NOT EXISTS idx_decisions_outcome ON decisions(outcome);
-        CREATE INDEX IF NOT EXISTS idx_decision_tags_tag ON decision_tags(tag);
-    """)
+    conn.executescript(load_store_schema())
 
     now = datetime.now(timezone.utc)
-    decision_ids = {}  # slug -> uuid for graph edges
+    decision_ids = {}  # slug -> id for graph edges
 
-    for i, d in enumerate(DECISIONS):
-        decision_id = str(uuid.uuid4())
-        date = (now - timedelta(days=d["days_ago"])).strftime("%Y-%m-%d")
+    for d in DECISIONS:
+        # Same format as decision_service.generate_decision_id; the graph keys
+        # nodes by these 8 characters.
+        decision_id = uuid.uuid4().hex[:8]
+        created_at = (now - timedelta(days=d["days_ago"])).isoformat()
 
         # Create a slug for graph edge mapping
-        slug = d["decision"].lower()
         for key, edge_slug in [
             ("Redis", "redis-caching"),
             ("gRPC", "grpc-migration"),
@@ -580,7 +553,7 @@ def create_database(db_path: str) -> None:
             ("Renovate", "renovate"),
             ("rate limiting", "rate-limiting"),
             ("Vault", "vault-secrets"),
-            ("CSP", "csp-headers"),
+            ("Content Security Policy", "csp-headers"),
             ("JWT", "jwt-rotation"),
             ("Stripe", "stripe-webhooks"),
             ("ETL", "custom-etl"),
@@ -594,23 +567,13 @@ def create_database(db_path: str) -> None:
                 decision_ids[edge_slug] = decision_id
                 break
 
-        # Quality score based on completeness
-        quality = 0.3  # base
-        if d.get("reasons"):
-            quality += 0.2
-        if d.get("tags"):
-            quality += 0.2
-        if d.get("pattern"):
-            quality += 0.2
-        if d.get("context"):
-            quality += 0.1
-
-        reviewed = 1 if d.get("outcome") else 0
+        reviewed = d.get("outcome") is not None
 
         conn.execute(
             """INSERT INTO decisions
-               (id, decision, confidence, category, stakes, context, date,
-                outcome, result, reviewed, reviewed_at, recorded_by, pattern, quality_score)
+               (id, decision, confidence, category, stakes, status, context,
+                recorded_by, pattern, outcome, outcome_result, reviewed_at,
+                created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 decision_id,
@@ -618,15 +581,15 @@ def create_database(db_path: str) -> None:
                 d["confidence"],
                 d["category"],
                 d["stakes"],
+                "reviewed" if reviewed else "pending",
                 d.get("context"),
-                date,
-                d.get("outcome"),
-                d.get("result"),
-                reviewed,
-                date if reviewed else None,
                 "demo-agent",
                 d.get("pattern"),
-                quality,
+                d.get("outcome"),
+                d.get("result"),
+                created_at if reviewed else None,
+                created_at,
+                created_at,
             ),
         )
 
@@ -643,25 +606,27 @@ def create_database(db_path: str) -> None:
             )
 
     conn.commit()
+    conn.close()
 
-    # Generate graph edges
+    # Generate graph edges in the server's JSONL format (graphdb/persistence.py)
     graph_edges = []
     for source_slug, target_slug, edge_type in GRAPH_EDGES:
         source_id = decision_ids.get(source_slug)
         target_id = decision_ids.get(target_slug)
         if source_id and target_id:
             graph_edges.append({
-                "source": source_id,
-                "target": target_id,
-                "type": edge_type,
+                "source_id": source_id,
+                "target_id": target_id,
+                "edge_type": edge_type,
+                "weight": 1.0,
                 "created_at": now.isoformat(),
+                "created_by": "seed-data",
+                "context": None,
             })
-
-    conn.close()
 
     # Write graph edges
     graph_path = Path(db_path).parent / "graph_edges.jsonl"
-    with open(graph_path, "w") as f:
+    with open(graph_path, "w", encoding="utf-8") as f:
         for edge in graph_edges:
             f.write(json.dumps(edge) + "\n")
 
