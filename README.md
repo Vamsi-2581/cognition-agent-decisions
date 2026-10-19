@@ -324,6 +324,7 @@ Evidence lives in its own SQLite WAL database, separate from the decision store:
 
 ```bash
 PROVENANCE_DB=~/.cstp/provenance.db   # default
+PROVENANCE_BUNDLE_DIR=~/.cstp/bundles # default; where exportEvidenceBundle writes
 ```
 
 PDF bundles need the optional `pdf` extra (`pip install -e ".[pdf]"`, included in `[all]`). JSON

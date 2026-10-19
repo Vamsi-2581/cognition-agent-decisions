@@ -79,7 +79,7 @@ AI Agents → POST /cstp (JSON-RPC 2.0, Bearer auth)
 
 Vector storage and embeddings are abstracted behind `VectorStore` and `EmbeddingProvider` ABCs (F048). Graph storage is abstracted behind `GraphStore` ABC (F045). Services access backends via factory singletons (`get_vector_store()`, `get_embedding_provider()`, `get_graph_store()`). Backend selection is driven by `VECTOR_BACKEND`, `EMBEDDING_PROVIDER`, and `GRAPH_BACKEND` env vars.
 
-F055 provenance evidence lives in its own SQLite WAL database at `PROVENANCE_DB` (default `~/.cstp/provenance.db`), deliberately separate from the decision store. The path is server-configured only — RPC callers cannot override it.
+F055 provenance evidence lives in its own SQLite WAL database at `PROVENANCE_DB` (default `~/.cstp/provenance.db`), deliberately separate from the decision store. The path is server-configured only — RPC callers cannot override it. The same goes for the bundle directory (`PROVENANCE_BUNDLE_DIR`, default `~/.cstp/bundles`) and the mapping rules directory.
 
 **Key constraint**: `src/cognition_engines/` must never import from `a2a/`. Core uses dataclasses, the a2a layer uses Pydantic.
 

@@ -25,6 +25,7 @@ import io
 import json
 import sqlite3
 import threading
+from contextlib import closing
 import pytest
 from pathlib import Path
 
@@ -123,6 +124,18 @@ def service_params_observed(db_with_observed, monkeypatch):
     """service_params variant with pre-loaded observed events."""
     monkeypatch.setattr(_svc, "DEFAULT_PROVENANCE_DB", db_with_observed)
     return {"db_path": db_with_observed}
+
+
+@pytest.fixture(autouse=True)
+def bundle_dir(tmp_path, monkeypatch):
+    """Route every bundle export to the test's tmp dir instead of ~/.cstp/bundles.
+
+    The service ignores output_dir in params, so DEFAULT_BUNDLE_DIR is the only
+    way to choose where bundles land.
+    """
+    path = tmp_path / "bundles"
+    monkeypatch.setattr(_svc, "DEFAULT_BUNDLE_DIR", str(path))
+    return path
 
 
 def _make_event(seq, event_type, payload, evidence_class="observed", ts="2026-07-01T00:00:00Z"):
@@ -323,7 +336,7 @@ class TestHashChainIntegrity:
         for i in range(3):
             append_event("src", "pr_opened", "observed", {"i": i},
                          ts="2026-01-01T00:00:00Z", db_path=db)
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn:
             conn.execute("UPDATE events SET payload_json = ? WHERE seq = 2", ('{"i":99}',))
             conn.commit()
         assert verify_chain(db) == 2
@@ -332,7 +345,7 @@ class TestHashChainIntegrity:
         for i in range(3):
             append_event("src", "pr_opened", "observed", {"i": i},
                          ts="2026-01-01T00:00:00Z", db_path=db)
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn:
             conn.execute("UPDATE events SET payload_json = ? WHERE seq = 1",
                          ('{"tampered":true}',))
             conn.commit()
@@ -342,7 +355,7 @@ class TestHashChainIntegrity:
         """Changing evidence_class must break the chain (it's in the hash preimage)."""
         append_event("src", "pr_opened", "observed", {"n": 1},
                      ts="2026-01-01T00:00:00Z", db_path=db)
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn:
             conn.execute("UPDATE events SET evidence_class = 'attested' WHERE seq = 1")
             conn.commit()
         assert verify_chain(db) == 1
@@ -353,7 +366,7 @@ class TestHashChainIntegrity:
             append_event("src", "pr_opened", "observed", {"i": i},
                          ts=f"2026-01-0{i+1}T00:00:00Z", db_path=db)
         original_head = get_head_hash(db)
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn:
             conn.execute("DELETE FROM events WHERE seq > 3")
             conn.commit()
         assert verify_chain(db) is None  # truncation invisible
@@ -365,7 +378,7 @@ class TestHashChainIntegrity:
             append_event("src", "pr_opened", "observed", {"i": i},
                          ts=f"2026-01-0{i+1}T00:00:00Z", db_path=db)
         original_head = get_head_hash(db)
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn:
             conn.execute("DELETE FROM events WHERE seq >= 4")
             conn.commit()
         result = verify_chain(db, expected_head_hash=original_head)
@@ -433,7 +446,7 @@ class TestVerifyAtCheckpoint:
                          ts=f"2026-01-0{i+1}T00:00:00Z", db_path=db)
         checkpoint = get_head(db)
         assert checkpoint is not None
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn:
             conn.execute("DELETE FROM events WHERE seq >= 4")
             conn.commit()
         assert verify_at_checkpoint(db, checkpoint[0], checkpoint[1]) == 0
@@ -444,7 +457,7 @@ class TestVerifyAtCheckpoint:
                          ts=f"2026-01-0{i+1}T00:00:00Z", db_path=db)
         head = get_head(db)
         assert head is not None
-        with sqlite3.connect(db) as conn:
+        with closing(sqlite3.connect(db)) as conn:
             conn.execute("UPDATE events SET payload_json = '{\"x\":99}' WHERE seq = 3")
             conn.commit()
         assert verify_at_checkpoint(db, head[0], head[1]) == 3
@@ -857,14 +870,12 @@ class TestPerClassCoverage:
     async def test_bundle_has_no_blended_coverage(self, tmp_path, monkeypatch):
         """exportEvidenceBundle JSON bundle must not contain a top-level coverage_pct."""
         db_path = str(tmp_path / "bundle_blend.db")
-        output_dir = tmp_path / "out"
         init_db(db_path)
         append_event("gh", "pr_opened", "observed",
                      {"pr_number": 1, "is_agent_authored": True},
                      ts="2026-01-01T00:00:00Z", db_path=db_path)
         monkeypatch.setattr(_svc, "DEFAULT_PROVENANCE_DB", db_path)
-        result = await export_evidence_bundle({"format": "json", "output_dir": str(output_dir)},
-                                               "test-agent")
+        result = await export_evidence_bundle({"format": "json"}, "test-agent")
         # The service-level result must not have blended coverage
         assert "coverage_pct" not in result, (
             "exportEvidenceBundle must not return a blended coverage_pct."
@@ -1075,16 +1086,15 @@ class TestIngestEvidence:
         )
 
     @pytest.mark.asyncio
-    async def test_ingest_unsupported_format_rejected(self, service_params, tmp_path):
+    async def test_ingest_unsupported_format_rejected(self, service_params, bundle_dir):
         """Finding 13: unsupported format must raise ValueError before creating any files."""
         params = {
             **service_params,
             "format": "jsn",  # typo
-            "output_dir": str(tmp_path / "bundles"),
         }
         with pytest.raises(ValueError, match="Unsupported bundle format"):
             await export_evidence_bundle(params, "agent-1")
-        assert not (tmp_path / "bundles").exists(), (
+        assert not bundle_dir.exists(), (
             "Finding 13: output_dir must not be created for invalid format"
         )
 
@@ -1224,7 +1234,6 @@ class TestExportEvidenceBundle:
         params = {
             **service_params_observed,
             "format": "json",
-            "output_dir": str(tmp_path / "bundles"),
         }
         result = await export_evidence_bundle(params, "agent-1")
         assert "json_path" in result
@@ -1235,7 +1244,6 @@ class TestExportEvidenceBundle:
         params = {
             **service_params_observed,
             "format": "json",
-            "output_dir": str(tmp_path / "bundles"),
         }
         result = await export_evidence_bundle(params, "agent-1")
         bundle = json.loads(Path(result["json_path"]).read_text(encoding="utf-8"))
@@ -1253,7 +1261,6 @@ class TestExportEvidenceBundle:
         params = {
             **service_params_observed,
             "format": "json",
-            "output_dir": str(tmp_path / "bundles"),
         }
         result = await export_evidence_bundle(params, "agent-1")
         bundle = json.loads(Path(result["json_path"]).read_text(encoding="utf-8"))
@@ -1268,7 +1275,6 @@ class TestExportEvidenceBundle:
         params = {
             **service_params_observed,
             "format": "json",
-            "output_dir": str(tmp_path / "bundles"),
         }
         result = await export_evidence_bundle(params, "agent-1")
         assert result["chain_intact"] is True
@@ -1278,12 +1284,11 @@ class TestExportEvidenceBundle:
         """Tampered chain must make chain_intact=False (uses stored checkpoint — P2 fix)."""
         params = {
             "format": "json",
-            "output_dir": str(tmp_path / "bundles"),
         }
         # First export to capture head hash / checkpoint
         await export_evidence_bundle(params, "agent-1")
         # Tamper and re-export
-        with sqlite3.connect(db_with_observed) as conn:
+        with closing(sqlite3.connect(db_with_observed)) as conn:
             conn.execute("UPDATE events SET payload_json = '{\"tampered\":true}' WHERE seq = 1")
             conn.commit()
         result = await export_evidence_bundle(params, "agent-1")
@@ -1294,12 +1299,11 @@ class TestExportEvidenceBundle:
         """Tail truncation must be detected via stored checkpoint (P2 fix)."""
         params = {
             "format": "json",
-            "output_dir": str(tmp_path / "bundles"),
         }
         # First bundle stores checkpoint
         await export_evidence_bundle(params, "agent-1")
         # Delete tail events
-        with sqlite3.connect(db_with_observed) as conn:
+        with closing(sqlite3.connect(db_with_observed)) as conn:
             conn.execute("DELETE FROM events WHERE seq >= 4")
             conn.commit()
         # Second bundle: chain appears internally intact, but checkpoint mismatch
@@ -1320,7 +1324,6 @@ class TestExportEvidenceBundle:
         """
         params = {
             "format": "json",
-            "output_dir": str(tmp_path / "bundles"),
         }
 
         # First export — captures checkpoint at seq 5
@@ -1350,7 +1353,6 @@ class TestExportEvidenceBundle:
         """
         params = {
             "format": "json",
-            "output_dir": str(tmp_path / "bundles"),
         }
 
         # First export (intact) — stores trusted checkpoint
@@ -1358,7 +1360,7 @@ class TestExportEvidenceBundle:
         assert r1["chain_intact"] is True
 
         # Delete tail events (tamper)
-        with sqlite3.connect(db_with_observed) as conn:
+        with closing(sqlite3.connect(db_with_observed)) as conn:
             conn.execute("DELETE FROM events WHERE seq >= 4")
             conn.commit()
 
@@ -1375,13 +1377,11 @@ class TestExportEvidenceBundle:
 
     @pytest.mark.asyncio
     async def test_unsupported_format_rejected_before_creating_dirs(self, service_params_observed,
-                                                                      tmp_path):
+                                                                      bundle_dir):
         """Finding 13: unsupported format must raise ValueError, not create dirs."""
-        bundle_dir = tmp_path / "bundles"
         params = {
             **service_params_observed,
             "format": "jsn",  # typo
-            "output_dir": str(bundle_dir),
         }
         with pytest.raises(ValueError, match="Unsupported bundle format"):
             await export_evidence_bundle(params, "agent-1")
@@ -1396,7 +1396,6 @@ class TestExportEvidenceBundle:
         params = {
             **service_params_observed,
             "format": "json",
-            "output_dir": str(tmp_path / "bundles"),
         }
         r1 = await export_evidence_bundle(params, "agent-1")
         await aio.sleep(1)  # extra guard for ts-based names
@@ -1404,6 +1403,55 @@ class TestExportEvidenceBundle:
         assert r1["json_path"] != r2["json_path"]
         assert Path(r1["json_path"]).exists()
         assert Path(r2["json_path"]).exists()
+
+
+class TestCallerCannotChoosePaths:
+    """Bundle and rules directories are server configuration, like the DB path.
+
+    Before the fix an authenticated agent could pass output_dir to make the server
+    create directories and write bundles anywhere it could reach, or pass an empty
+    mappings_dir to get a bundle with zero control mappings that still read clean.
+    """
+
+    @pytest.mark.asyncio
+    async def test_export_ignores_output_dir(self, service_params_observed, tmp_path,
+                                             bundle_dir):
+        elsewhere = tmp_path / "elsewhere"
+        params = {**service_params_observed, "format": "json", "output_dir": str(elsewhere)}
+
+        result = await export_evidence_bundle(params, "agent-1")
+
+        assert not elsewhere.exists()
+        assert Path(result["json_path"]).parent == bundle_dir
+
+    @pytest.mark.asyncio
+    async def test_export_ignores_mappings_dir(self, service_params_observed, tmp_path):
+        empty_rules = tmp_path / "no-rules"
+        empty_rules.mkdir()
+
+        honest = await export_evidence_bundle(
+            {**service_params_observed, "format": "json"}, "agent-1"
+        )
+        spoofed = await export_evidence_bundle(
+            {**service_params_observed, "format": "json", "mappings_dir": str(empty_rules)},
+            "agent-1",
+        )
+
+        assert spoofed["coverage"] == honest["coverage"]
+        assert spoofed["coverage"]["observed"]["mapped_events"] > 0
+
+    @pytest.mark.asyncio
+    async def test_map_controls_ignores_mappings_dir(self, service_params_observed, tmp_path):
+        empty_rules = tmp_path / "no-rules"
+        empty_rules.mkdir()
+
+        honest = await map_controls(service_params_observed, "agent-1")
+        spoofed = await map_controls(
+            {**service_params_observed, "mappings_dir": str(empty_rules)}, "agent-1"
+        )
+
+        assert spoofed == honest
+        assert honest["coverage"]["observed"]["mapped_events"] > 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1436,12 +1484,9 @@ class TestVerifyEvidenceChain:
     async def test_uses_stored_bundle_head_hash(self, db_with_observed, tmp_path):
         """Without explicit expected_head_hash, uses last bundle checkpoint (P2 fix)."""
         # Generate a bundle to store the checkpoint
-        await export_evidence_bundle(
-            {"format": "json", "output_dir": str(tmp_path / "b")},
-            "agent-1",
-        )
+        await export_evidence_bundle({"format": "json"}, "agent-1")
         # Delete tail events — truncation should be detectable via stored checkpoint
-        with sqlite3.connect(db_with_observed) as conn:
+        with closing(sqlite3.connect(db_with_observed)) as conn:
             conn.execute("DELETE FROM events WHERE seq >= 4")
             conn.commit()
         result = await verify_evidence_chain({}, "agent-1")
@@ -1450,7 +1495,7 @@ class TestVerifyEvidenceChain:
 
     @pytest.mark.asyncio
     async def test_tampered_record_returns_broken(self, db_with_observed):
-        with sqlite3.connect(db_with_observed) as conn:
+        with closing(sqlite3.connect(db_with_observed)) as conn:
             conn.execute(
                 "UPDATE events SET payload_json = '{\"tampered\":true}' WHERE seq = 2"
             )
@@ -1469,7 +1514,6 @@ class TestEndToEndWorkflow:
     async def test_full_workflow(self, tmp_path, monkeypatch):
         """Ingest → Link → MapControls → Export → Verify."""
         db_path = str(tmp_path / "workflow.db")
-        output_dir = str(tmp_path / "bundles")
         init_db(db_path)
         monkeypatch.setattr(_svc, "DEFAULT_PROVENANCE_DB", db_path)
 
@@ -1505,7 +1549,6 @@ class TestEndToEndWorkflow:
         # 4. Export bundle
         export_result = await export_evidence_bundle({
             "format": "json",
-            "output_dir": output_dir,
         }, "test-agent")
         assert export_result["chain_intact"] is True
         bundle = json.loads(Path(export_result["json_path"]).read_text(encoding="utf-8"))

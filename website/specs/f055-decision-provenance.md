@@ -364,7 +364,9 @@ CREATE TABLE bundle_metadata (
 
 The `db_path` RPC parameter described in earlier drafts was removed: the service always resolves
 to the server-configured `PROVENANCE_DB`, so an authenticated caller cannot redirect reads or
-writes to an arbitrary file.
+writes to an arbitrary file. The `output_dir` and `mappings_dir` parameters were removed for the
+same reason: bundles go to `PROVENANCE_BUNDLE_DIR`, and rules always load from the packaged
+mappings, so a caller cannot write files elsewhere or swap in an empty rule set.
 
 ## Out of Scope
 
