@@ -209,7 +209,7 @@ Check a proposed action against all active guardrails.
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `action` | object | ✅ | Action context |
-| `action.description` | string | ✅ | What the agent intends to do |
+| `action.description` | string | ✅ | What the agent intends to do (max 10,000 characters) |
 | `action.category` | string | ❌ | Decision category |
 | `action.stakes` | string | ❌ | Stakes level (default: `"medium"`) |
 | `action.confidence` | float | ❌ | Agent's confidence (0.0–1.0) |
@@ -307,11 +307,11 @@ Record a new decision with full metadata, reasoning trace, and optional guardrai
 
 | Param | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `decision` | string | ✅ | — | Decision text / title |
+| `decision` | string | ✅ | — | Decision text / title (max 10,000 characters) |
 | `confidence` | float | ✅ | — | Confidence level (0.0–1.0) |
 | `category` | string | ✅ | — | Category (e.g., `"architecture"`, `"trading"`) |
 | `stakes` | string | ❌ | `"medium"` | `"low"`, `"medium"`, `"high"`, `"critical"` |
-| `context` | string | ❌ | — | Free-text context |
+| `context` | string | ❌ | — | Free-text context (max 50,000 characters) |
 | `reasons` | array | ❌ | `[]` | List of reason objects |
 | `reasons[].type` | string | — | — | Reason type: `"technical"`, `"risk"`, `"constraint"`, etc. |
 | `reasons[].text` | string | — | — | Reason text |
@@ -737,7 +737,9 @@ have no MCP tool equivalents.**
 
 Evidence is stored in its own SQLite WAL database, separate from the decision store, at the path
 given by `PROVENANCE_DB` (default `~/.cstp/provenance.db`). The path is server-configured and
-cannot be overridden per request.
+cannot be overridden per request. The same holds for the bundle output directory
+(`PROVENANCE_BUNDLE_DIR`, default `~/.cstp/bundles`) and the control-mapping rules, which always
+load from `a2a/cstp/provenance/mappings/`.
 
 ### The Two-Class Evidence Model
 
@@ -903,7 +905,9 @@ requiring human review (`MV-3`, `MEASURE-2.5`) fail closed unless `actor_is_huma
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `format` | string | ❌ | `"json"` (default) or `"pdf"`. Validated before any output directory is created |
-| `output_dir` | string | ❌ | Destination directory |
+
+Bundles are written to the server's `PROVENANCE_BUNDLE_DIR`; the response's `json_path` /
+`pdf_path` say where. An `output_dir` or `mappings_dir` param is ignored.
 
 PDF export requires the optional `pdf` extra (`pip install -e ".[pdf]"`, included in `[all]`).
 Without `reportlab` installed, a `format: "pdf"` request raises. Bundle filenames include a UUID
@@ -1047,7 +1051,7 @@ Validate an intended action against safety guardrails and policies.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `description` | string | ✅ | — | Action you intend to take |
+| `description` | string | ✅ | — | Action you intend to take (max 10,000 characters) |
 | `category` | string | ❌ | — | Action category |
 | `stakes` | string | ❌ | `"medium"` | `"low"`, `"medium"`, `"high"`, `"critical"` |
 | `confidence` | float | ❌ | — | Your confidence (0.0–1.0) |
@@ -1066,11 +1070,11 @@ Record a decision to the immutable decision log manually. Use only when `pre_act
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `decision` | string | ✅ | — | What you decided (state the choice) |
+| `decision` | string | ✅ | — | What you decided (state the choice; max 10,000 characters) |
 | `confidence` | float | ✅ | — | Confidence level (0.0–1.0) |
 | `category` | string | ✅ | — | `"architecture"`, `"process"`, `"integration"`, `"tooling"`, `"security"` |
 | `stakes` | string | ❌ | `"medium"` | Stakes level |
-| `context` | string | ❌ | — | Situation context |
+| `context` | string | ❌ | — | Situation context (max 50,000 characters) |
 | `reasons` | array | ❌ | — | `[{"type": "analysis", "text": "..."}]` — types: authority, analogy, analysis, pattern, intuition |
 | `tags` | array | ❌ | — | Tags for categorization |
 | `project` | string | ❌ | — | Project in owner/repo format |
