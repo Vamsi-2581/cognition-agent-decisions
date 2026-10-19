@@ -1173,6 +1173,10 @@ async def run_stdio() -> None:
     None`. Since store writes are authoritative, that failure would propagate to
     the caller — and record_decision would delete the YAML file it had just
     written, on the assumption the write never landed.
+
+    The graph store needs the same lifespan setup: without it the persisted
+    edges are never loaded, and get_graph/get_neighbors report saved decisions
+    as "Node not found".
     """
     logger.info("Starting CSTP MCP server (stdio transport)")
 
@@ -1182,6 +1186,23 @@ async def run_stdio() -> None:
     await store.initialize()
     mark_initialized()
     logger.info("Decision store initialized (backend=%s)", type(store).__name__)
+
+    from .cstp.graph_service import initialize_graph_from_decisions
+    from .cstp.graphdb.factory import (
+        get_graph_store,
+        mark_initialized as mark_graph_initialized,
+        set_graph_store,
+    )
+
+    try:
+        graph_store = get_graph_store()
+        await graph_store.initialize()
+        await initialize_graph_from_decisions()
+        mark_graph_initialized()
+        logger.info("Graph store initialized")
+    except Exception:
+        logger.warning("Graph store initialization failed", exc_info=True)
+        set_graph_store(None)
 
     try:
         async with stdio_server() as (read_stream, write_stream):

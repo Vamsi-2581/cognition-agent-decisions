@@ -260,3 +260,80 @@ class TestStdioInitializesDecisionStore:
             await mcp_server.run_stdio()
 
         assert closed == [True]
+
+
+class TestStdioInitializesGraphStore:
+    """Regression: `cstp-mcp` never loaded the persisted graph.
+
+    The FastAPI lifespan initializes the graph store; the stdio entrypoint did
+    not, so get_graph/get_neighbors reported saved decisions as "Node not found".
+    """
+
+    async def test_persisted_edges_are_loaded_before_serving(self, tmp_path) -> None:
+        import contextlib
+
+        from a2a import mcp_server
+        from a2a.cstp.graphdb import GraphEdge
+        from a2a.cstp.graphdb.factory import get_graph_store, set_graph_store
+        from a2a.cstp.graphdb.networkx_store import NetworkXGraphStore
+        from a2a.cstp.graphdb.persistence import save_edges_to_jsonl
+
+        edges_path = tmp_path / "graph_edges.jsonl"
+        save_edges_to_jsonl(
+            [GraphEdge(source_id="aaaa1111", target_id="bbbb2222", edge_type="relates_to")],
+            edges_path,
+        )
+        set_graph_store(NetworkXGraphStore(persistence_path=str(edges_path)))
+
+        seen: dict[str, object] = {}
+
+        @contextlib.asynccontextmanager
+        async def _fake_stdio():
+            yield (object(), object())
+
+        async def _fake_run(*args: object, **kwargs: object) -> None:
+            store = get_graph_store()
+            seen["edges"] = await store.edge_count()
+            seen["node"] = await store.get_node("aaaa1111")
+
+        with (
+            patch.object(mcp_server, "stdio_server", _fake_stdio),
+            patch.object(mcp_server.mcp_app, "run", _fake_run),
+            patch.object(mcp_server.mcp_app, "create_initialization_options", lambda: {}),
+        ):
+            await mcp_server.run_stdio()
+
+        assert seen["edges"] == 1
+        assert seen["node"] is not None
+
+    async def test_graph_failure_does_not_stop_serving(self) -> None:
+        import contextlib
+
+        from a2a import mcp_server
+        from a2a.cstp.graphdb.factory import set_graph_store
+        from a2a.cstp.graphdb.memory import MemoryGraphStore
+
+        store = MemoryGraphStore()
+
+        async def _broken_init() -> None:
+            raise OSError("graph file unreadable")
+
+        store.initialize = _broken_init  # type: ignore[method-assign]
+        set_graph_store(store)
+        served: list[bool] = []
+
+        @contextlib.asynccontextmanager
+        async def _fake_stdio():
+            yield (object(), object())
+
+        async def _fake_run(*args: object, **kwargs: object) -> None:
+            served.append(True)
+
+        with (
+            patch.object(mcp_server, "stdio_server", _fake_stdio),
+            patch.object(mcp_server.mcp_app, "run", _fake_run),
+            patch.object(mcp_server.mcp_app, "create_initialization_options", lambda: {}),
+        ):
+            await mcp_server.run_stdio()
+
+        assert served == [True]
