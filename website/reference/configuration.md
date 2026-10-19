@@ -142,7 +142,7 @@ auth:
 
 ### MCP Authentication
 
-The MCP Streamable HTTP transport at `/mcp` inherits authentication from the FastAPI bearer token middleware. The same `CSTP_AUTH_TOKENS` configuration applies to both the JSON-RPC `/cstp` endpoint and the MCP `/mcp` endpoint.
+The MCP Streamable HTTP transport at `/mcp` checks the same bearer token as the JSON-RPC `/cstp` endpoint, so one `CSTP_AUTH_TOKENS` configuration covers both. A request without a valid `Authorization: Bearer` header gets `401` before it reaches any MCP tool.
 
 The stdio transport (`python -m a2a.mcp_server`) does not use bearer tokens — it relies on the process-level security of the hosting environment (e.g., Docker container isolation).
 

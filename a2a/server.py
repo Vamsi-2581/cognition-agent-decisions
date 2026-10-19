@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .auth import AuthManager, set_auth_manager, verify_bearer_token
+from .auth import AuthManager, get_auth_manager, set_auth_manager, verify_bearer_token
 from .config import Config
 from .cstp import CstpDispatcher, get_dispatcher, register_methods
 from .models import AgentCapabilities, AgentCard, HealthResponse
@@ -206,12 +206,32 @@ def _mount_mcp(app: FastAPI) -> None:
     from starlette.types import Receive, Scope, Send
 
     async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
-        """ASGI handler that delegates to the MCP session manager."""
+        """ASGI handler that delegates to the MCP session manager.
+
+        A raw mount bypasses the `verify_bearer_token` dependency that guards
+        /cstp, so the same token check runs here, before anything reaches the
+        MCP tools. Without it anyone who could reach the port could read and
+        write decisions.
+        """
+        from fastapi import HTTPException
+        from starlette.requests import HTTPConnection
+        from starlette.responses import JSONResponse as StarletteJSON
+
+        try:
+            get_auth_manager().verify_token(
+                HTTPConnection(scope).headers.get("authorization", "")
+            )
+        except HTTPException as exc:
+            await StarletteJSON(
+                {"error": exc.detail},
+                status_code=exc.status_code,
+                headers=exc.headers,
+            )(scope, receive, send)
+            return
+
         session_manager = getattr(app.state, "mcp_session_manager", None)
         if session_manager is None:
             # MCP not available — return 503
-            from starlette.responses import JSONResponse as StarletteJSON
-
             response = StarletteJSON(
                 {"error": "MCP transport not available"},
                 status_code=503,

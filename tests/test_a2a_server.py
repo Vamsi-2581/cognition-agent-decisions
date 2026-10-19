@@ -298,3 +298,57 @@ class TestCheckGuardrails:
         assert "result" in data
         assert data["result"]["allowed"] is True
         assert "violations" in data["result"]
+
+
+class _RecordingSessionManager:
+    """Stands in for StreamableHTTPSessionManager; records what reached it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def handle_request(self, scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+        from starlette.responses import JSONResponse as StarletteJSON
+
+        self.calls += 1
+        await StarletteJSON({"ok": True})(scope, receive, send)
+
+
+class TestMcpEndpointAuth:
+    """Regression: /mcp is a raw ASGI mount, so the /cstp auth dependency never ran.
+
+    Unauthenticated callers could list and call every MCP tool, including
+    log_decision and update_decision.
+    """
+
+    _INITIALIZE = {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {}}
+
+    def test_missing_token_is_rejected_before_mcp(self, client: TestClient) -> None:
+        manager = _RecordingSessionManager()
+        client.app.state.mcp_session_manager = manager  # type: ignore[attr-defined]
+
+        response = client.post("/mcp/", json=self._INITIALIZE)
+
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert manager.calls == 0
+
+    def test_invalid_token_is_rejected_before_mcp(self, client: TestClient) -> None:
+        manager = _RecordingSessionManager()
+        client.app.state.mcp_session_manager = manager  # type: ignore[attr-defined]
+
+        response = client.post(
+            "/mcp/", json=self._INITIALIZE, headers={"Authorization": "Bearer wrong"}
+        )
+
+        assert response.status_code == 401
+        assert manager.calls == 0
+
+    def test_valid_token_passes_auth(self, client: TestClient) -> None:
+        # No session manager: a 503 means the request got past the auth check.
+        client.app.state.mcp_session_manager = None  # type: ignore[attr-defined]
+
+        response = client.post(
+            "/mcp/", json=self._INITIALIZE, headers={"Authorization": "Bearer test-token"}
+        )
+
+        assert response.status_code == 503
