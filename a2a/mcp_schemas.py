@@ -247,7 +247,8 @@ class LogDecisionInput(BaseModel):
     )
     agent_id: str | None = Field(
         default=None,
-        description="Agent identifier for multi-agent deliberation isolation. "
+        description="Label for multi-agent deliberation isolation within this "
+        "connection's token; the decision is recorded under the token's agent. "
         "Use when multiple agents share an MCP connection.",
     )
     decision_id: str | None = Field(
@@ -420,12 +421,13 @@ class RecordThoughtInput(BaseModel):
     text: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Reasoning/chain-of-thought text to record",
     )
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Agent identifier for multi-agent isolation. "
+            "Label for multi-agent isolation within this connection's token. "
             "Thoughts from different agent_ids are tracked separately. "
             "Required when multiple agents share an MCP connection."
         ),
@@ -519,8 +521,9 @@ class PreActionInput(BaseModel):
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Agent identifier for multi-agent attribution. "
-            "Use when multiple agents share an MCP connection."
+            "Label for this agent's deliberation bucket when several agents "
+            "share one MCP connection. Decisions are always recorded under the "
+            "connection's token, not this label."
         ),
     )
 
@@ -565,8 +568,8 @@ class GetSessionContextInput(BaseModel):
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Agent identifier for multi-agent attribution. "
-            "Use when multiple agents share an MCP connection."
+            "Ignored: the result is built for the connection's token. "
+            "Accepted so existing clients still validate."
         ),
     )
 
@@ -606,8 +609,8 @@ class ReadyInput(BaseModel):
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Agent identifier for multi-agent attribution. "
-            "Use when multiple agents share an MCP connection."
+            "Ignored: the result is built for the connection's token. "
+            "Accepted so existing clients still validate."
         ),
     )
 

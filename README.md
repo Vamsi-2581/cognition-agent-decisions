@@ -191,6 +191,11 @@ curl -X POST http://localhost:8100/cstp \
 
 The F055 provenance methods are JSON-RPC only — they have no MCP tool equivalents.
 
+Every call acts as the agent its bearer token maps to. An agent may change only the
+decisions it recorded; `resetCircuit`, `reindex`, `attributeOutcomes` and `ingestEvidence`
+need an agent listed in `CSTP_ADMIN_AGENTS` (or `auth.admins`), and the dashboard's token must
+be one. See [Identity and Permissions](website/reference/api.md#identity-and-permissions).
+
 ### Auto-Linking
 
 When `recordDecision` is called with related decisions (from `pre_action` or explicit `related_to`), the graph is automatically updated with `relates_to` edges. No manual `linkDecisions` call needed for common relationships.
@@ -207,6 +212,7 @@ curl -X POST http://localhost:8100/cstp \
 ```
 
 Returns active tracker sessions with composite keys, input counts, thought text, and age.
+An agent sees only its own sessions; admins see all.
 
 ## Architecture
 

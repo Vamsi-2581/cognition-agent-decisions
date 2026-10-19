@@ -5,7 +5,7 @@ Tests cover:
 - CEL string condition evaluation
 - CEL dict condition ({"cel": "..."}) evaluation
 - action.context.* access via CEL
-- Invalid CEL fails open (no block)
+- Invalid CEL fails closed (the rule applies)
 - Program caching (same expression compiled once)
 - Complex CEL expressions (AND/OR/NOT/in/contains/size)
 - Legacy flat condition_*/requires_* format unaffected
@@ -15,6 +15,7 @@ Tests cover:
 import pytest
 
 from a2a.cstp.guardrails_service import (
+    CelEvaluationError,
     CelGuardrailEvaluator,
     Guardrail,
     _build_cel_activation,
@@ -129,6 +130,19 @@ class TestJsonbConditionToCel:
         # The "cel" key should be skipped in conversion
         assert result == "true"
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("< 0.5", "action.quality_score < 0.5"),
+            (">=0.8", "action.quality_score >= 0.8"),
+            ("== 1", "action.quality_score == 1.0"),
+        ],
+    )
+    def test_comparison_string_becomes_operator(self, value, expected):
+        # guardrails/quality.yaml writes quality_score: "< 0.5"; rendered as an
+        # equality it compared a number to a string and errored every time.
+        assert _jsonb_condition_to_cel({"quality_score": value}) == expected
+
 
 # ---------------------------------------------------------------------------
 # _parse_guardrail: CEL detection
@@ -239,17 +253,16 @@ class TestCelGuardrailEvaluator:
             "g1", expr, {"category": "tooling", "code_review": True}
         ) is False
 
-    def test_context_field_missing_fails_open(self):
-        """Missing context key causes CEL error → fail open (no trigger)."""
+    def test_context_field_missing_raises(self):
+        """Missing context key is a CEL error, reported to the caller."""
         expr = "action.context.architecture_review == true"
-        # architecture_review not in context → CEL key error → fail open
-        result = self.evaluator.evaluate("g1", expr, {"category": "architecture"})
-        assert result is False
+        with pytest.raises(CelEvaluationError):
+            self.evaluator.evaluate("g1", expr, {"category": "architecture"})
 
-    def test_invalid_cel_syntax_fails_open(self):
+    def test_invalid_cel_syntax_raises(self):
         expr = "THIS IS NOT VALID CEL !!!"
-        result = self.evaluator.evaluate("g1", expr, {"stakes": "high"})
-        assert result is False
+        with pytest.raises(CelEvaluationError):
+            self.evaluator.evaluate("g1", expr, {"stakes": "high"})
 
     def test_program_caching(self):
         """Same expression compiled only once — second call uses cache."""
@@ -409,8 +422,8 @@ async def test_context_dict_via_cel(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_invalid_cel_fails_open(tmp_path):
-    """Invalid CEL expression does not block — fails open."""
+async def test_invalid_cel_fails_closed(tmp_path):
+    """A block rule that cannot be evaluated blocks instead of being skipped."""
     yaml_content = """
 - id: broken-cel
   description: Bad CEL expression
@@ -421,8 +434,61 @@ async def test_invalid_cel_fails_open(tmp_path):
     (tmp_path / "test.yaml").write_text(yaml_content, encoding="utf-8")
 
     result = await evaluate_guardrails({"stakes": "high"}, guardrails_dir=tmp_path)
-    assert result.allowed  # fail open
-    assert result.violations == []
+    assert not result.allowed
+    [violation] = result.violations
+    assert violation.guardrail_id == "broken-cel"
+    assert "could not be evaluated" in violation.message
+
+
+@pytest.mark.asyncio
+async def test_cel_runtime_error_in_warn_rule_warns(tmp_path):
+    yaml_content = """
+- id: broken-warn
+  description: Compares a number to a string
+  condition: "action.confidence == 'high'"
+  action: warn
+  message: Should not appear
+"""
+    (tmp_path / "test.yaml").write_text(yaml_content, encoding="utf-8")
+
+    result = await evaluate_guardrails({"confidence": 0.9}, guardrails_dir=tmp_path)
+    assert result.allowed
+    assert [w.guardrail_id for w in result.warnings] == ["broken-warn"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "context",
+    [
+        # Checking an action before it is taken: no record-phase fields.
+        {"category": "process", "stakes": "medium", "confidence": 0.8},
+        {
+            "category": "process", "stakes": "medium", "confidence": 0.8,
+            "phase": "record", "quality_score": 0.9,
+            "has_deliberation": True, "has_reasoning": True,
+        },
+    ],
+)
+async def test_shipped_cel_guardrails_evaluate_cleanly(context):
+    """Errors now trigger rules, so the shipped rules must never error."""
+    clear_guardrails_cache()
+    result = await evaluate_guardrails(context)
+    triggered = [g.guardrail_id for g in result.violations + result.warnings]
+    assert not {"require-deliberation", "recommend-reasoning", "low-quality-recording"} & set(
+        triggered
+    )
+
+
+@pytest.mark.asyncio
+async def test_low_quality_recording_fires_on_low_scores():
+    clear_guardrails_cache()
+    result = await evaluate_guardrails({
+        "category": "process", "stakes": "medium", "confidence": 0.8,
+        "phase": "record", "quality_score": 0.2,
+        "has_deliberation": True, "has_reasoning": True,
+    })
+    [violation] = [v for v in result.violations if v.guardrail_id == "low-quality-recording"]
+    assert "score 0.2" in violation.message
 
 
 @pytest.mark.asyncio

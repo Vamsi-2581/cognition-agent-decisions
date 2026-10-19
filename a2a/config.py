@@ -32,10 +32,22 @@ class AuthConfig:
     Attributes:
         enabled: Whether authentication is required.
         tokens: List of valid tokens.
+        admins: Agents allowed to run operator methods (resetCircuit, reindex,
+            attributeOutcomes, ingestEvidence), see every tracker session, and
+            change decisions other agents recorded.
     """
 
     enabled: bool = True
     tokens: list[AuthToken] = field(default_factory=list)
+    admins: list[str] = field(default_factory=list)
+
+    def is_admin(self, agent_id: str) -> bool:
+        """Return whether an authenticated agent has the admin role.
+
+        With authentication disabled every caller is the same local user, so
+        all of them are admins.
+        """
+        return not self.enabled or agent_id in self.admins
 
     def validate_token(self, token: str) -> str | None:
         """Validate a bearer token.
@@ -81,11 +93,17 @@ class TrackerConfig:
         input_ttl_seconds: TTL for individual inputs within a session.
         session_ttl_seconds: TTL for entire tracker sessions (in seconds).
         consumed_history_size: Max consumed records to retain.
+        max_sessions_per_agent: Open sessions one agent may hold; past it the
+            agent's least recently active session is dropped.
+        max_inputs_per_session: Inputs one session keeps; past it the oldest
+            input is dropped.
     """
 
     input_ttl_seconds: int = 300
     session_ttl_seconds: int = 1800
     consumed_history_size: int = 50
+    max_sessions_per_agent: int = 200
+    max_inputs_per_session: int = 100
 
 
 @dataclass(slots=True)
@@ -169,6 +187,7 @@ class Config:
             CSTP_HOST: Server bind address
             CSTP_PORT: Server bind port
             CSTP_AUTH_TOKENS: Comma-separated agent:token pairs
+            CSTP_ADMIN_AGENTS: Comma-separated agents with the admin role
             CSTP_AGENT_NAME: Agent name
             CSTP_AGENT_DESCRIPTION: Agent description
             CSTP_AGENT_VERSION: Agent version
@@ -195,11 +214,18 @@ class Config:
             auth=AuthConfig(
                 enabled=True,
                 tokens=_parse_auth_tokens(os.getenv("CSTP_AUTH_TOKENS", "")),
+                admins=_parse_names(os.getenv("CSTP_ADMIN_AGENTS", "")),
             ),
             tracker=TrackerConfig(
                 input_ttl_seconds=int(os.getenv("CSTP_TRACKER_INPUT_TTL", "300")),
                 session_ttl_seconds=int(os.getenv("CSTP_TRACKER_SESSION_TTL", "1800")),
                 consumed_history_size=int(os.getenv("CSTP_TRACKER_HISTORY_SIZE", "50")),
+                max_sessions_per_agent=int(
+                    os.getenv("CSTP_TRACKER_MAX_SESSIONS_PER_AGENT", "200")
+                ),
+                max_inputs_per_session=int(
+                    os.getenv("CSTP_TRACKER_MAX_INPUTS_PER_SESSION", "100")
+                ),
             ),
             storage=StorageConfig(
                 backend=os.getenv("CSTP_STORAGE", "sqlite"),
@@ -251,6 +277,7 @@ class Config:
             config.auth = AuthConfig(
                 enabled=auth.get("enabled", True),
                 tokens=tokens,
+                admins=[str(name) for name in auth.get("admins") or []],
             )
 
         # Storage config
@@ -275,6 +302,8 @@ class Config:
                 input_ttl_seconds=tr.get("input_ttl_seconds", 300),
                 session_ttl_seconds=session_ttl,
                 consumed_history_size=tr.get("consumed_history_size", 50),
+                max_sessions_per_agent=tr.get("max_sessions_per_agent", 200),
+                max_inputs_per_session=tr.get("max_inputs_per_session", 100),
             )
 
         return config
@@ -303,3 +332,8 @@ def _parse_auth_tokens(tokens_str: str) -> list[AuthToken]:
                 tokens.append(AuthToken(agent=agent.strip(), token=token.strip()))
 
     return tokens
+
+
+def _parse_names(names_str: str) -> list[str]:
+    """Parse a comma-separated list of agent names, dropping blanks."""
+    return [name.strip() for name in names_str.split(",") if name.strip()]

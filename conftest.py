@@ -91,3 +91,18 @@ def _isolated_index_backends():
     set_graph_store(None)
     set_vector_store(None)
     set_embedding_provider(None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_auth_manager():
+    """Undo any test's change to the global AuthManager.
+
+    The server lifespan and several tests install one, and the admin check in
+    `a2a.cstp.access` reads it, so a manager left behind with auth disabled
+    would make every later caller an admin.
+    """
+    from a2a import auth
+
+    previous = auth._auth_manager
+    yield
+    auth._auth_manager = previous

@@ -797,6 +797,7 @@ class TestCompactOnReviewDecision:
             MagicMock(),  # file path
             {
                 "id": "rev12345",
+                "recorded_by": "test-agent",
                 "status": "reviewed",
                 "date": datetime.now(UTC).isoformat(),
                 "outcome": "success",
@@ -843,6 +844,7 @@ class TestCompactOnReviewDecision:
             MagicMock(),
             {
                 "id": "old12345",
+                "recorded_by": "test-agent",
                 "status": "reviewed",
                 "date": old_date,
                 "outcome": "success",
@@ -883,7 +885,10 @@ class TestCompactOnReviewDecision:
                 return {"success": True, "id": self.id}
 
         mock_review.return_value = MockReviewResponse()
-        mock_find.side_effect = RuntimeError("File not found")
+        # The ownership check reads the decision first; the lookup after the
+        # review is the one that fails.
+        owned = (MagicMock(), {"id": "err12345", "recorded_by": "test-agent"})
+        mock_find.side_effect = [owned, RuntimeError("File not found")]
 
         req = JsonRpcRequest(
             id="3",

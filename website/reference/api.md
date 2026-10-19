@@ -50,6 +50,24 @@ Authorization: Bearer <agent>:<token>
 
 The agent name is extracted from the token pair and included in audit trails.
 
+### Identity and Permissions
+
+The token's agent is the caller's identity on both `/cstp` and `/mcp`. An `agentId` /
+`agent_id` argument never changes it: it only labels a deliberation bucket inside the
+caller's own namespace, so subagents sharing one token stay apart and no other token can
+add thoughts to those buckets or consume them.
+
+- **Only your own decisions.** `updateDecision`, `reviewDecision`, `setPreserve`,
+  `linkEvidence`, and `recordThought` appending to a recorded decision require the decision
+  to have been recorded by the caller.
+- **Admin only.** `resetCircuit`, `reindex`, `attributeOutcomes` and `ingestEvidence` require
+  an agent listed in `auth.admins` (`CSTP_ADMIN_AGENTS`; see
+  [Configuration](./configuration.md#admin-role)). Admins may also change any agent's
+  decisions.
+- **`debugTracker`** shows an agent only its own sessions; admins see every session.
+
+A denied call returns error `-32009`; an MCP tool returns `{"error": "permission_denied"}`.
+
 ### Error Codes
 
 | Code | Name | Description |
@@ -58,7 +76,7 @@ The agent name is extracted from the token pair and included in audit trails.
 | -32600 | Invalid Request | Missing required fields |
 | -32601 | Method Not Found | Unknown CSTP method |
 | -32602 | Invalid Params | Parameter validation failed |
-| -32603 | Internal Error | Unexpected server error |
+| -32603 | Internal Error | Unexpected server error. The message is `Internal error (ref <id>)`; the detail is in the server log under that reference |
 | -32002 | Rate Limited | Too many requests |
 | -32003 | Query Failed | Error during decision query |
 | -32004 | Guardrail Eval Failed | Error evaluating guardrails |
@@ -66,6 +84,7 @@ The agent name is extracted from the token pair and included in audit trails.
 | -32006 | Review Failed | Error reviewing decision |
 | -32007 | Decision Not Found | Decision ID not found |
 | -32008 | Attribution Failed | Error attributing outcomes |
+| -32009 | Permission Denied | The caller's agent may not perform this operation (see above) |
 
 ---
 
@@ -388,7 +407,8 @@ Record a new decision with full metadata, reasoning trace, and optional guardrai
 
 ### `cstp.reviewDecision` — Record Outcome
 
-Record the actual outcome of a previously recorded decision.
+Record the actual outcome of a previously recorded decision. Only the agent that recorded
+it, or an admin, may review it.
 
 **Parameters:**
 
@@ -453,6 +473,7 @@ Retrieve full decision record including bridge definition and deliberation trace
 ### `cstp.updateDecision` - Update Existing Decision
 
 Update fields on an existing decision. Use after recording to finalize with actual outcomes.
+Only the agent that recorded it, or an admin, may update it.
 
 **Parameters:**
 
@@ -509,8 +530,8 @@ Record chain-of-thought reasoning. Pre-decision mode accumulates in the tracker;
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
-| `text` | string | ✅ | Reasoning text |
-| `decision_id` | string | ❌ | If set, appends to existing decision (post-decision mode) |
+| `text` | string | ✅ | Reasoning text, at most 10,000 characters |
+| `decision_id` | string | ❌ | If set, appends to existing decision (post-decision mode); the caller must have recorded it |
 
 **Pre-decision example (no decision_id):**
 
@@ -651,7 +672,8 @@ Compute confidence calibration metrics for reviewed decisions.
 
 ### `cstp.attributeOutcomes` — Automatic Outcome Attribution
 
-Automatically attribute outcomes to decisions based on PR stability (age).
+Automatically attribute outcomes to decisions based on PR stability (age). Admin only: it
+writes outcomes onto every matching decision, whichever agent recorded it.
 
 **Parameters:**
 
@@ -705,7 +727,7 @@ Compare recent calibration against historical baseline to detect degradation.
 
 ### `cstp.reindex` — Full Reindex
 
-Delete and rebuild the ChromaDB collection from YAML files.
+Delete and rebuild the ChromaDB collection from YAML files. Admin only.
 
 **Parameters:**
 
@@ -759,6 +781,10 @@ response, the JSON bundle, or the PDF — merging the two would weaken the stron
 
 Append third-party events to the hash chain. All ingested events receive
 `evidence_class: "observed"`; this is not overridable. A batch is ingested atomically.
+
+Admin only: control mappings treat observed events as coming from a system the decision's
+agent does not control, such as a human PR approval, so an agent must not be able to write
+them. Each payload is stamped with `ingested_by`, the agent that sent it.
 
 **Parameters:**
 
@@ -817,7 +843,8 @@ Append third-party events to the hash chain. All ingested events receive
 ### `cstp.linkEvidence` — Correlate a Decision to Observed Events
 
 Links an existing CSTP decision to observed event sequence numbers, creating one
-`cstp_decision_linked` record with `evidence_class: "attested"`.
+`cstp_decision_linked` record with `evidence_class: "attested"`. The decision must exist
+and have been recorded by the caller (admins may link any decision).
 
 **Parameters:**
 
@@ -1183,7 +1210,7 @@ curl -X POST http://localhost:8100/cstp \
   -d '{"jsonrpc":"2.0","method":"cstp.debugTracker","params":{},"id":1}'
 ```
 
-Returns active sessions with composite tracker keys, input counts, thought text, source, and age in seconds. Useful for debugging multi-agent deliberation isolation.
+Returns active sessions with composite tracker keys, input counts, thought text, source, and age in seconds. Useful for debugging multi-agent deliberation isolation. Keys are namespaced by the token's agent (`emerson|agent:planner`); an agent sees only its own sessions, admins see all.
 
 ---
 
@@ -1200,7 +1227,8 @@ MCP tool errors are returned as `TextContent` with JSON:
 
 Error types:
 - `validation_error` — Invalid input (Pydantic validation failure)
-- `internal_error` — Unexpected server error
+- `permission_denied` — The token's agent may not perform this operation
+- `internal_error` — Unexpected server error; the message carries a reference to the server log
 
 ---
 

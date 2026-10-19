@@ -4,6 +4,7 @@ Routes incoming JSON-RPC requests to appropriate method handlers.
 """
 
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -12,9 +13,16 @@ from ..models.jsonrpc import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
     METHOD_NOT_FOUND,
+    PERMISSION_DENIED,
     JsonRpcError,
     JsonRpcRequest,
     JsonRpcResponse,
+)
+from .access import (
+    PermissionDeniedError,
+    is_admin,
+    require_admin,
+    require_decision_owner,
 )
 from .attribution_service import (
     AttributeOutcomesRequest,
@@ -110,12 +118,13 @@ def build_tracker_key(
     """Build a composite tracker key for deliberation tracking (F129).
 
     Delegates to deliberation_tracker.build_tracker_key with the
-    transport-derived fallback key.
+    transport-derived fallback key. Composite keys are namespaced under the
+    authenticated agent, so `agent_id` is only a label within its buckets.
 
     Priority: most-specific composite key first.
-    - agent_id + decision_id → "agent:{agent_id}:decision:{decision_id}"
-    - agent_id only → "agent:{agent_id}"
-    - decision_id only → "decision:{decision_id}"
+    - agent_id + decision_id → "{transport_agent_id}|agent:{agent_id}:decision:{decision_id}"
+    - agent_id only → "{transport_agent_id}|agent:{agent_id}"
+    - decision_id only → "{transport_agent_id}|decision:{decision_id}"
     - neither → "rpc:{transport_agent_id}" (backward-compatible fallback)
     """
     from .deliberation_tracker import build_tracker_key as _tracker_build_key
@@ -124,6 +133,7 @@ def build_tracker_key(
         agent_id=agent_id,
         decision_id=decision_id,
         transport_key=f"rpc:{transport_agent_id}",
+        principal=transport_agent_id,
     )
 
 
@@ -190,13 +200,21 @@ class CstpDispatcher:
                     message=str(e),
                 ),
             )
-        except Exception as e:
+        except PermissionDeniedError as e:
+            return JsonRpcResponse.failure(
+                request.id,
+                JsonRpcError(code=PERMISSION_DENIED, message=str(e)),
+            )
+        except Exception:
+            # Unexpected errors can carry paths, SQL or backend detail, so the
+            # caller gets a reference to the server log instead of the message.
+            ref = uuid.uuid4().hex[:12]
+            logger.exception("%s failed (ref %s)", request.method, ref)
             return JsonRpcResponse.failure(
                 request.id,
                 JsonRpcError(
                     code=INTERNAL_ERROR,
-                    message=str(e),
-                    data={"type": type(e).__name__},
+                    message=f"Internal error (ref {ref})",
                 ),
             )
 
@@ -899,6 +917,7 @@ async def _handle_set_preserve(
     if errors:
         raise ValueError("; ".join(errors))
 
+    await require_decision_owner(request.decision_id, agent_id)
     response = await set_preserve(request)
     return response.to_dict()
 
@@ -1080,6 +1099,7 @@ async def _handle_reset_circuit(
     """
     from .circuit_breaker_service import get_circuit_breaker_manager
 
+    require_admin(agent_id, "cstp.resetCircuit")
     request = ResetCircuitRequest.from_params(params)
     mgr = await get_circuit_breaker_manager()
     result = await mgr.reset(
@@ -1105,7 +1125,13 @@ async def _handle_reset_circuit(
 
 
 async def _handle_ingest_evidence(params: dict[str, Any], agent_id: str) -> dict[str, Any]:
-    """Handle cstp.ingestEvidence method (F055)."""
+    """Handle cstp.ingestEvidence method (F055).
+
+    Admin only: ingested events are "observed" evidence, which control
+    mappings trust as coming from a system the decision's agent does not
+    control (e.g. a human PR approval).
+    """
+    require_admin(agent_id, "cstp.ingestEvidence")
     return await ingest_evidence(params, agent_id)
 
 
@@ -1199,12 +1225,12 @@ def register_methods(dispatcher: CstpDispatcher) -> None:
 async def _handle_debug_tracker(params: dict[str, Any], agent_id: str) -> dict[str, Any]:
     """Handle cstp.debugTracker method (F126).
 
-    Read-only peek at deliberation tracker state for debugging.
-    Any authenticated agent can inspect all sessions (admin-level debug tool).
+    Read-only peek at deliberation tracker state for debugging. Sessions hold
+    agents' in-flight reasoning, so an agent sees only its own; admins see all.
 
     Args:
         params: JSON-RPC params with optional 'key' field.
-        agent_id: Authenticated agent ID (not scoped — intentional for debugging).
+        agent_id: Authenticated agent ID.
 
     Returns:
         Tracker debug info with sessions, counts, and input details.
@@ -1214,7 +1240,11 @@ async def _handle_debug_tracker(params: dict[str, Any], agent_id: str) -> dict[s
 
     params = params or {}
     request = DebugTrackerRequest.from_params(params)
-    raw = debug_tracker(key=request.key, include_consumed=request.include_consumed)
+    raw = debug_tracker(
+        key=request.key,
+        include_consumed=request.include_consumed,
+        owner=None if is_admin(agent_id) else agent_id,
+    )
     response = DebugTrackerResponse.from_raw(raw)
     return response.to_dict()
 
@@ -1241,6 +1271,7 @@ async def _handle_update_decision(params: dict[str, Any], agent_id: str) -> dict
     if not updates:
         raise ValueError("Missing required parameter: updates")
 
+    await require_decision_owner(decision_id, agent_id)
     return await update_decision(decision_id, updates)
 
 
@@ -1275,6 +1306,7 @@ async def _handle_record_thought(params: dict[str, Any], agent_id: str) -> dict[
     if legacy_decision_id and not request.agent_id and not request.decision_id:
         from .decision_service import append_thought
 
+        await require_decision_owner(legacy_decision_id, agent_id)
         result = await append_thought(legacy_decision_id, request.text)
         if not result.get("success"):
             raise ValueError(result.get("error", "Unknown error"))
@@ -1292,6 +1324,7 @@ async def _handle_record_thought(params: dict[str, Any], agent_id: str) -> dict[
     track_reasoning(
         tracker_key, request.text,
         agent_id=request.agent_id, decision_id=request.decision_id,
+        principal=agent_id,
     )
     return {
         "success": True,
@@ -1349,6 +1382,7 @@ async def _handle_reindex(params: dict[str, Any], agent_id: str) -> dict[str, An
     Returns:
         Reindex result as dict.
     """
+    require_admin(agent_id, "cstp.reindex")
     result = await reindex_decisions()
     return result.to_dict()
 
@@ -1383,6 +1417,7 @@ async def _handle_record_decision(params: dict[str, Any], agent_id: str) -> dict
     if not request.related_to:
         related_raw = extract_related_from_tracker(
             tracker_key, agent_id=client_agent_id, decision_id=client_decision_id,
+            principal=agent_id,
         )
         if related_raw:
             from .decision_service import RelatedDecision
@@ -1399,6 +1434,7 @@ async def _handle_record_decision(params: dict[str, Any], agent_id: str) -> dict
         deliberation=request.deliberation,
         agent_id=client_agent_id,
         decision_id=client_decision_id,
+        principal=agent_id,
     )
 
     # Validate before bridge extraction, which runs regexes over the raw text.
@@ -1486,6 +1522,8 @@ async def _handle_review_decision(params: dict[str, Any], agent_id: str) -> dict
     if errors:
         raise ValueError(f"Validation failed: {'; '.join(errors)}")
 
+    await require_decision_owner(request.id, agent_id)
+
     # Review the decision
     response = await review_decision(request)
 
@@ -1566,6 +1604,8 @@ async def _handle_attribute_outcomes(params: dict[str, Any], agent_id: str) -> d
     Raises:
         ValueError: If validation fails.
     """
+    # Writes outcomes onto every matching decision, whoever recorded it.
+    require_admin(agent_id, "cstp.attributeOutcomes")
     request = AttributeOutcomesRequest.from_dict(params)
     response = await attribute_outcomes(request)
     return response.to_dict()

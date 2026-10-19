@@ -382,6 +382,10 @@ def parse_tracker_key(key: str) -> dict[str, str | None]:
         "agent_id": None, "decision_id": None,
         "transport": None, "transport_id": None, "raw": key,
     }
+    # The server namespaces keys under the authenticated agent: "{agent}|{key}".
+    _, sep, scoped = key.partition("|")
+    if sep:
+        key = scoped
     if key.startswith("agent:") and ":decision:" in key:
         parts = key.split(":decision:")
         result["agent_id"] = parts[0].removeprefix("agent:")

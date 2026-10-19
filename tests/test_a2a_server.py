@@ -305,11 +305,13 @@ class _RecordingSessionManager:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.agent_ids: list[str | None] = []
 
     async def handle_request(self, scope, receive, send) -> None:  # type: ignore[no-untyped-def]
         from starlette.responses import JSONResponse as StarletteJSON
 
         self.calls += 1
+        self.agent_ids.append(scope.get("state", {}).get("agent_id"))
         await StarletteJSON({"ok": True})(scope, receive, send)
 
 
@@ -342,6 +344,18 @@ class TestMcpEndpointAuth:
 
         assert response.status_code == 401
         assert manager.calls == 0
+
+    def test_token_agent_reaches_mcp_in_request_state(self, client: TestClient) -> None:
+        # MCP tools read their identity from here, not from tool arguments.
+        manager = _RecordingSessionManager()
+        client.app.state.mcp_session_manager = manager  # type: ignore[attr-defined]
+
+        response = client.post(
+            "/mcp/", json=self._INITIALIZE, headers={"Authorization": "Bearer test-token"}
+        )
+
+        assert response.status_code == 200
+        assert manager.agent_ids == ["test"]
 
     def test_valid_token_passes_auth(self, client: TestClient) -> None:
         # No session manager: a 503 means the request got past the auth check.

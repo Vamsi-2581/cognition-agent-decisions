@@ -57,6 +57,8 @@ async def lifespan(app: FastAPI):
         input_ttl=app.state.config.tracker.input_ttl_seconds,
         session_ttl=app.state.config.tracker.session_ttl_seconds,
         consumed_history_size=app.state.config.tracker.consumed_history_size,
+        max_sessions_per_agent=app.state.config.tracker.max_sessions_per_agent,
+        max_inputs_per_session=app.state.config.tracker.max_inputs_per_session,
     )
 
     # F050: Initialize decision store
@@ -211,15 +213,17 @@ def _mount_mcp(app: FastAPI) -> None:
         A raw mount bypasses the `verify_bearer_token` dependency that guards
         /cstp, so the same token check runs here, before anything reaches the
         MCP tools. Without it anyone who could reach the port could read and
-        write decisions.
+        write decisions. The verified agent goes into the request state, where
+        the tools read their identity (see `mcp_server.get_caller_agent_id`).
         """
         from fastapi import HTTPException
         from starlette.requests import HTTPConnection
         from starlette.responses import JSONResponse as StarletteJSON
 
+        connection = HTTPConnection(scope)
         try:
-            get_auth_manager().verify_token(
-                HTTPConnection(scope).headers.get("authorization", "")
+            connection.state.agent_id = get_auth_manager().verify_token(
+                connection.headers.get("authorization", "")
             )
         except HTTPException as exc:
             await StarletteJSON(
@@ -239,22 +243,7 @@ def _mount_mcp(app: FastAPI) -> None:
             await response(scope, receive, send)
             return
 
-        # F023 Phase 2: Set MCP tracker key from session ID header
-        from .mcp_server import _mcp_tracker_key
-
-        session_id = None
-        for header_name, header_value in scope.get("headers", []):
-            if header_name.lower() == b"mcp-session-id":
-                session_id = header_value.decode("utf-8", errors="replace")
-                break
-
-        token = _mcp_tracker_key.set(
-            f"mcp:{session_id}" if session_id else "mcp:default"
-        )
-        try:
-            await session_manager.handle_request(scope, receive, send)
-        finally:
-            _mcp_tracker_key.reset(token)
+        await session_manager.handle_request(scope, receive, send)
 
     # Mount as raw ASGI app (not a FastAPI route — MCP handles its own dispatch)
     app.mount("/mcp", handle_mcp)

@@ -7,7 +7,8 @@ from typing import Any
 # Upper bounds on caller-supplied free text. Recording runs regex bridge
 # extraction synchronously on the (single-worker) event loop, so an unbounded
 # field let one request stall every other caller. MAX_TEXT_CHARS applies to the
-# decision / action description, the pattern, and each reason's text.
+# decision / action description, the pattern, each reason's text, and each
+# recorded thought (which the deliberation tracker holds in memory).
 MAX_TEXT_CHARS = 10_000
 MAX_CONTEXT_CHARS = 50_000
 
@@ -1230,6 +1231,8 @@ class RecordThoughtParams:
         text = params.get("text", "")
         if not text:
             raise ValueError("Missing required parameter: text")
+        if len(text) > MAX_TEXT_CHARS:
+            raise ValueError(f"text: must be at most {MAX_TEXT_CHARS} characters")
 
         return cls(
             text=text,

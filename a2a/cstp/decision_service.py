@@ -933,9 +933,6 @@ async def get_decision(request: GetDecisionRequest) -> GetDecisionResponse:
         if len(parts) == 2:
             data["id"] = parts[1]
 
-        # Add file path for reference
-        data["_file"] = str(yaml_file)
-
         return GetDecisionResponse(found=True, decision=data)
 
     except yaml.YAMLError as e:

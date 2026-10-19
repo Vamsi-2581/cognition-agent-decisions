@@ -56,13 +56,40 @@ class ConsumedRecord:
     input_count: int
     agent_id: str | None
     decision_id: str | None  # backfilled after record_decision
-    status: str  # "consumed" | "expired"
+    status: str  # "consumed" | "expired" | "evicted"
     inputs_summary: list[dict[str, str]]  # [{id, type, text}] - brief snapshot
+
+
+def principal_key(principal: str, key: str) -> str:
+    """Namespace a tracker key under the authenticated agent.
+
+    Agent and decision labels come from request arguments, so two tokens can
+    name the same bucket. The prefix keeps each token's buckets apart: one
+    token cannot add thoughts to, or consume, another token's deliberation.
+    """
+    return f"{principal}|{key}"
+
+
+def key_owner(key: str) -> str | None:
+    """Return the authenticated agent a tracker key belongs to, if known.
+
+    Keys are either namespaced with `principal_key` or are the JSON-RPC
+    transport key `rpc:{agent}`, which only that agent's token produces.
+    """
+    owner, sep, _ = key.partition("|")
+    if sep:
+        return owner
+    if key.startswith("rpc:"):
+        return key.removeprefix("rpc:")
+    return None
 
 
 def _parse_key_components(key: str) -> dict[str, str | None]:
     """Extract agent_id/decision_id from composite key."""
     result: dict[str, str | None] = {"agent_id": None, "decision_id": None}
+    _, sep, scoped = key.partition("|")
+    if sep:
+        key = scoped
     if key.startswith("agent:") and ":decision:" in key:
         parts = key.split(":decision:")
         result["agent_id"] = parts[0].removeprefix("agent:")
@@ -85,11 +112,17 @@ class DeliberationTracker:
         input_ttl: int = 300,
         session_ttl: int = 1800,
         consumed_history_size: int = 50,
+        max_sessions_per_agent: int = 200,
+        max_inputs_per_session: int = 100,
     ) -> None:
         self._sessions: dict[str, TrackerSession] = {}
         self._input_ttl = input_ttl
         self._session_ttl = session_ttl
         self._consumed_history: deque[ConsumedRecord] = deque(maxlen=consumed_history_size)
+        # Callers choose session keys, so without caps one agent could grow the
+        # tracker without bound until the session TTL expired its entries.
+        self._max_sessions_per_agent = max_sessions_per_agent
+        self._max_inputs_per_session = max_inputs_per_session
         self._lock = threading.Lock()
 
     def track(self, key: str, tracked_input: TrackedInput) -> None:
@@ -100,10 +133,26 @@ class DeliberationTracker:
                 self._cleanup_expired_locked()
 
             if key not in self._sessions:
+                self._evict_for_new_session_locked(key)
                 self._sessions[key] = TrackerSession()
             session = self._sessions[key]
             session.inputs.append(tracked_input)
+            if len(session.inputs) > self._max_inputs_per_session:
+                del session.inputs[0]
             session.last_activity = time.time()
+
+    def _evict_for_new_session_locked(self, key: str) -> None:
+        """Make room for a new session of the key's owner (must hold lock).
+
+        Drops the owner's least recently active session when the owner is at
+        its cap, so one agent filling the tracker never evicts another's.
+        """
+        owner = key_owner(key)
+        owned = [k for k in self._sessions if key_owner(k) == owner]
+        if len(owned) < self._max_sessions_per_agent:
+            return
+        oldest = min(owned, key=lambda k: self._sessions[k].last_activity)
+        self._retire_locked(oldest, time.time(), status="evicted")
 
     def consume(self, key: str) -> Deliberation | None:
         """Build Deliberation from tracked inputs and clear them.
@@ -186,27 +235,30 @@ class DeliberationTracker:
                 expired_keys.append(k)
 
         for k in expired_keys:
-            session = self._sessions.pop(k)
-            # Move to consumed history with 'expired' status
-            parsed = _parse_key_components(k)
-            valid_inputs = [
-                i for i in session.inputs
-                if i.timestamp >= (now - self._input_ttl)
-            ]
-            self._consumed_history.append(ConsumedRecord(
-                key=k,
-                consumed_at=now,
-                input_count=len(valid_inputs),
-                agent_id=parsed.get("agent_id"),
-                decision_id=None,
-                status="expired",
-                inputs_summary=[
-                    {"id": i.id, "type": i.type, "text": i.text[:80]}
-                    for i in valid_inputs[:10]
-                ],
-            ))
+            self._retire_locked(k, now, status="expired")
 
         return len(expired_keys)
+
+    def _retire_locked(self, key: str, now: float, status: str) -> None:
+        """Drop a session unconsumed, keeping a history record (must hold lock)."""
+        session = self._sessions.pop(key)
+        parsed = _parse_key_components(key)
+        valid_inputs = [
+            i for i in session.inputs
+            if i.timestamp >= (now - self._input_ttl)
+        ]
+        self._consumed_history.append(ConsumedRecord(
+            key=key,
+            consumed_at=now,
+            input_count=len(valid_inputs),
+            agent_id=parsed.get("agent_id"),
+            decision_id=None,
+            status=status,
+            inputs_summary=[
+                {"id": i.id, "type": i.type, "text": i.text[:80]}
+                for i in valid_inputs[:10]
+            ],
+        ))
 
     def _build_deliberation(
         self, inputs: list[TrackedInput]
@@ -263,6 +315,7 @@ class DeliberationTracker:
         self,
         key: str | None = None,
         include_consumed: bool = False,
+        owner: str | None = None,
     ) -> dict[str, Any]:
         """Peek at tracker state for debugging. Read-only, does not consume.
 
@@ -270,6 +323,8 @@ class DeliberationTracker:
             key: If provided, return detail for just that session.
                  If None, return all sessions.
             include_consumed: If True, include consumed/expired session history.
+            owner: If provided, only sessions and history belonging to this
+                authenticated agent are visible.
 
         Returns:
             Dict with sessions list, session_count, detail mapping, and
@@ -284,14 +339,14 @@ class DeliberationTracker:
 
             if key is not None:
                 session = self._sessions.get(key)
-                if session is None:
+                if session is None or (owner is not None and key_owner(key) != owner):
                     result: dict[str, Any] = {
                         "sessions": [],
                         "sessionCount": 0,
                         "detail": {},
                     }
                     if include_consumed:
-                        result["consumed"] = self._get_consumed_history_locked()
+                        result["consumed"] = self._get_consumed_history_locked(owner=owner)
                     return result
                 valid = [i for i in session.inputs if i.timestamp >= cutoff]
                 inputs = [
@@ -311,13 +366,15 @@ class DeliberationTracker:
                     "detail": detail,
                 }
                 if include_consumed:
-                    result["consumed"] = self._get_consumed_history_locked()
+                    result["consumed"] = self._get_consumed_history_locked(owner=owner)
                 return result
 
             # All sessions
             sessions: list[str] = []
             detail: dict[str, Any] = {}
             for k, session in self._sessions.items():
+                if owner is not None and key_owner(k) != owner:
+                    continue
                 sessions.append(k)
                 valid = [i for i in session.inputs if i.timestamp >= cutoff]
                 inputs = [
@@ -339,7 +396,7 @@ class DeliberationTracker:
             }
 
             if include_consumed:
-                result["consumed"] = self._get_consumed_history_locked()
+                result["consumed"] = self._get_consumed_history_locked(owner=owner)
 
             return result
 
@@ -365,10 +422,15 @@ class DeliberationTracker:
         with self._lock:
             return self._get_consumed_history_locked(limit)
 
-    def _get_consumed_history_locked(self, limit: int = 20) -> list[dict[str, Any]]:
+    def _get_consumed_history_locked(
+        self, limit: int = 20, owner: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return consumed history (must hold lock or be called under lock)."""
         now = time.time()
-        records = list(reversed(self._consumed_history))[:limit]
+        records = [
+            r for r in reversed(self._consumed_history)
+            if owner is None or key_owner(r.key) == owner
+        ][:limit]
         return [
             {
                 "key": r.key,
@@ -417,6 +479,7 @@ def build_tracker_key(
     agent_id: str | None = None,
     decision_id: str | None = None,
     transport_key: str | None = None,
+    principal: str | None = None,
 ) -> str:
     """Build a composite tracker key from optional components.
 
@@ -429,7 +492,10 @@ def build_tracker_key(
     Args:
         agent_id: Optional explicit agent identifier.
         decision_id: Optional decision identifier.
-        transport_key: Fallback transport-derived key.
+        transport_key: Fallback transport-derived key, already bound to the
+            authenticated agent by the transport.
+        principal: Authenticated agent; namespaces the agent/decision keys
+            (see `principal_key`). Every server call site passes it.
 
     Returns:
         Composite tracker key string.
@@ -438,22 +504,25 @@ def build_tracker_key(
         ValueError: If all three are None/empty.
     """
     if agent_id and decision_id:
-        return f"agent:{agent_id}:decision:{decision_id}"
-    if agent_id:
-        return f"agent:{agent_id}"
-    if decision_id:
-        return f"decision:{decision_id}"
-    if transport_key:
+        key = f"agent:{agent_id}:decision:{decision_id}"
+    elif agent_id:
+        key = f"agent:{agent_id}"
+    elif decision_id:
+        key = f"decision:{decision_id}"
+    elif transport_key:
         return transport_key
-    raise ValueError(
-        "At least one of agent_id, decision_id, or transport_key is required"
-    )
+    else:
+        raise ValueError(
+            "At least one of agent_id, decision_id, or transport_key is required"
+        )
+    return principal_key(principal, key) if principal else key
 
 
 def resolve_tracker_keys(
     agent_id: str | None = None,
     decision_id: str | None = None,
     transport_key: str | None = None,
+    principal: str | None = None,
 ) -> list[str]:
     """Return priority-ordered list of tracker keys to try for consumption.
 
@@ -465,21 +534,24 @@ def resolve_tracker_keys(
         agent_id: Optional explicit agent identifier.
         decision_id: Optional decision identifier.
         transport_key: Fallback transport-derived key.
+        principal: Authenticated agent; namespaces the agent/decision keys.
 
     Returns:
         List of keys to try, most-specific first.
     """
-    keys: list[str] = []
+    scoped: list[str] = []
 
     # Most specific: exact composite
     if agent_id and decision_id:
-        keys.append(f"agent:{agent_id}:decision:{decision_id}")
-    # Decision-scoped (any agent)
+        scoped.append(f"agent:{agent_id}:decision:{decision_id}")
+    # Decision-scoped (any agent label of this principal)
     if decision_id:
-        keys.append(f"decision:{decision_id}")
+        scoped.append(f"decision:{decision_id}")
     # Agent-scoped (any decision)
     if agent_id:
-        keys.append(f"agent:{agent_id}")
+        scoped.append(f"agent:{agent_id}")
+
+    keys = [principal_key(principal, k) for k in scoped] if principal else scoped
     # Transport fallback
     if transport_key:
         keys.append(transport_key)
@@ -506,6 +578,8 @@ def get_tracker(
     input_ttl: int = 300,
     session_ttl: int = 1800,
     consumed_history_size: int = 50,
+    max_sessions_per_agent: int = 200,
+    max_inputs_per_session: int = 100,
 ) -> DeliberationTracker:
     """Get or create the global tracker instance."""
     global _tracker
@@ -517,6 +591,8 @@ def get_tracker(
                 input_ttl=input_ttl,
                 session_ttl=session_ttl,
                 consumed_history_size=consumed_history_size,
+                max_sessions_per_agent=max_sessions_per_agent,
+                max_inputs_per_session=max_inputs_per_session,
             )
         return _tracker
 
@@ -531,18 +607,20 @@ def reset_tracker() -> None:
 def debug_tracker(
     key: str | None = None,
     include_consumed: bool = False,
+    owner: str | None = None,
 ) -> dict[str, Any]:
     """Convenience wrapper for debugging tracker state.
 
     Args:
         key: Optional session key to inspect. None returns all sessions.
         include_consumed: If True, include consumed/expired session history.
+        owner: If provided, limit the view to this authenticated agent.
 
     Returns:
         Dict with sessions, sessionCount, detail, and optionally consumed.
     """
     tracker = get_tracker()
-    return tracker.debug_sessions(key, include_consumed=include_consumed)
+    return tracker.debug_sessions(key, include_consumed=include_consumed, owner=owner)
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +749,7 @@ def track_reasoning(
     text: str,
     decision_id: str | None = None,
     agent_id: str | None = None,
+    principal: str | None = None,
 ) -> None:
     """Track a reasoning/chain-of-thought step. Fail-open.
 
@@ -687,6 +766,7 @@ def track_reasoning(
         text: The reasoning/thought text.
         decision_id: Optional decision ID for scoping the thought.
         agent_id: Optional agent ID for multi-agent isolation.
+        principal: Authenticated agent that namespaces the composite key.
     """
     try:
         tracker = get_tracker()
@@ -694,6 +774,7 @@ def track_reasoning(
             agent_id=agent_id,
             decision_id=decision_id,
             transport_key=key,
+            principal=principal,
         )
         raw_data: dict[str, Any] = {"text": text}
         if decision_id:
@@ -720,6 +801,7 @@ def auto_attach_deliberation(
     deliberation: Deliberation | None,
     agent_id: str | None = None,
     decision_id: str | None = None,
+    principal: str | None = None,
 ) -> tuple[Deliberation | None, bool]:
     """Consume tracked inputs and attach/merge with deliberation. Fail-open.
 
@@ -731,6 +813,7 @@ def auto_attach_deliberation(
         deliberation: Explicit deliberation from the client, or None.
         agent_id: Optional agent ID for multi-agent key resolution.
         decision_id: Optional decision ID for decision-scoped key resolution.
+        principal: Authenticated agent that namespaces the composite keys.
 
     Returns:
         (deliberation, auto_captured) -- auto_captured is True only if
@@ -742,7 +825,7 @@ def auto_attach_deliberation(
     """
     try:
         tracker = get_tracker()
-        keys = resolve_tracker_keys(agent_id, decision_id, key)
+        keys = resolve_tracker_keys(agent_id, decision_id, key, principal=principal)
 
         # Try consuming from each key in priority order, merge all found
         combined_delib: Deliberation | None = None
@@ -798,6 +881,7 @@ def extract_related_from_tracker(
     key: str,
     agent_id: str | None = None,
     decision_id: str | None = None,
+    principal: str | None = None,
 ) -> list[dict]:
     """Extract related decisions from tracked inputs BEFORE consumption.
 
@@ -811,13 +895,14 @@ def extract_related_from_tracker(
         key: Transport-derived key (fallback).
         agent_id: Optional agent ID for multi-agent key resolution.
         decision_id: Optional decision ID for decision-scoped key resolution.
+        principal: Authenticated agent that namespaces the composite keys.
 
     Returns:
         List of dicts with id, summary, distance - deduplicated and sorted.
     """
     try:
         tracker = get_tracker()
-        keys = resolve_tracker_keys(agent_id, decision_id, key)
+        keys = resolve_tracker_keys(agent_id, decision_id, key, principal=principal)
 
         with tracker._lock:
             seen: dict[str, dict] = {}

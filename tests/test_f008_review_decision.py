@@ -216,7 +216,7 @@ class TestReviewDecisionEndpoint:
         )
 
         with patch("a2a.cstp.decision_service.DECISIONS_PATH", str(tmp_path)):
-            review_response = await dispatcher.dispatch(review_request, "reviewer")
+            review_response = await dispatcher.dispatch(review_request, "test-agent")
 
         assert review_response.error is None
         assert review_response.result["success"] is True

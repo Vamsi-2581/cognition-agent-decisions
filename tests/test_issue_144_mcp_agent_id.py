@@ -1,8 +1,10 @@
-"""Tests for issue #144: agent_id passthrough in MCP handlers.
+"""Tests for issue #144: agent identity in MCP handlers.
 
-Verifies that _handle_pre_action_mcp, _handle_get_session_context_mcp,
-and _handle_ready_mcp correctly forward the agent_id argument to their
-respective service functions (defaulting to "mcp-client" when omitted).
+Issue #144 forwarded the agent_id argument to the services as the caller's
+identity. Identity now comes from the transport (the bearer token's agent, or
+"mcp-client" for calls without an HTTP request), so these tests check that
+_handle_pre_action_mcp, _handle_get_session_context_mcp and _handle_ready_mcp
+pass the caller through, and that agent_id only labels deliberation buckets.
 """
 
 import importlib.util
@@ -33,14 +35,37 @@ from unittest.mock import patch  # noqa: E402
 import pytest  # noqa: E402
 
 
+class _OutsideAnyRequest:
+    """Stands in for the mocked SDK's Server outside a request."""
+
+    @property
+    def request_context(self):  # type: ignore[no-untyped-def]
+        raise LookupError
+
+
+@pytest.fixture
+def _outside_an_mcp_request(monkeypatch):
+    """Handlers called directly run outside any MCP request.
+
+    The real Server.request_context raises LookupError there, which makes the
+    caller the local agent; the mocked SDK used without mcp would hand back a
+    mock request instead.
+    """
+    if not _mcp_available:
+        import a2a.mcp_server as server
+
+        monkeypatch.setattr(server, "mcp_app", _OutsideAnyRequest())
+
+
 # ---------------------------------------------------------------------------
 # pre_action handler
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_pre_action_passes_agent_id() -> None:
-    """pre_action handler forwards explicit agent_id to service."""
+@pytest.mark.usefixtures("_outside_an_mcp_request")
+async def test_pre_action_agent_id_is_only_a_label() -> None:
+    """pre_action keeps agent_id as the bucket label, not the identity."""
     mock_response = MagicMock()
     mock_response.to_dict.return_value = {"allowed": True, "decisionId": "abc12345"}
 
@@ -58,10 +83,12 @@ async def test_pre_action_passes_agent_id() -> None:
 
         mock_fn.assert_called_once()
         _, kwargs = mock_fn.call_args
-        assert kwargs["agent_id"] == "my-agent"
+        assert kwargs["agent_id"] == "mcp-client"
+        assert kwargs["tracker_key"] == "mcp-client|mcp:my-agent"
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_outside_an_mcp_request")
 async def test_pre_action_defaults_to_mcp_client() -> None:
     """pre_action handler defaults agent_id to 'mcp-client' when omitted."""
     mock_response = MagicMock()
@@ -89,8 +116,9 @@ async def test_pre_action_defaults_to_mcp_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_session_context_passes_agent_id() -> None:
-    """get_session_context handler forwards explicit agent_id to service."""
+@pytest.mark.usefixtures("_outside_an_mcp_request")
+async def test_get_session_context_ignores_agent_id_for_identity() -> None:
+    """get_session_context passes the caller, whatever agent_id says."""
     mock_response = MagicMock()
     mock_response.to_dict.return_value = {"markdown": "# Context"}
 
@@ -107,10 +135,11 @@ async def test_get_session_context_passes_agent_id() -> None:
 
         mock_fn.assert_called_once()
         _, kwargs = mock_fn.call_args
-        assert kwargs["agent_id"] == "planner-agent"
+        assert kwargs["agent_id"] == "mcp-client"
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_outside_an_mcp_request")
 async def test_get_session_context_defaults_to_mcp_client() -> None:
     """get_session_context handler defaults agent_id to 'mcp-client' when omitted."""
     mock_response = MagicMock()
@@ -136,8 +165,9 @@ async def test_get_session_context_defaults_to_mcp_client() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ready_passes_agent_id() -> None:
-    """ready handler forwards explicit agent_id to service."""
+@pytest.mark.usefixtures("_outside_an_mcp_request")
+async def test_ready_ignores_agent_id_for_identity() -> None:
+    """ready passes the caller, whatever agent_id says."""
     mock_response = MagicMock()
     mock_response.to_dict.return_value = {"actions": [], "total": 0}
 
@@ -154,10 +184,11 @@ async def test_ready_passes_agent_id() -> None:
 
         mock_fn.assert_called_once()
         _, kwargs = mock_fn.call_args
-        assert kwargs["agent_id"] == "dev-agent"
+        assert kwargs["agent_id"] == "mcp-client"
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_outside_an_mcp_request")
 async def test_ready_defaults_to_mcp_client() -> None:
     """ready handler defaults agent_id to 'mcp-client' when omitted."""
     mock_response = MagicMock()

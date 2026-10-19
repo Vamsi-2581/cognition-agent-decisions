@@ -186,6 +186,16 @@ _SUFFIX_TO_CEL_OP: dict[str, str] = {
     "_gte": ">=",
 }
 
+# Comparison prefix in a legacy string value → CEL operator
+_COMPARISON_TO_CEL_OP: dict[str, str] = {
+    "<": "<",
+    ">": ">",
+    "<=": "<=",
+    ">=": ">=",
+    "==": "==",
+    "!=": "!=",
+}
+
 # Special field name remapping for legacy JSONB keys
 _LEGACY_FIELD_REMAP: dict[str, str] = {
     "quality_lt": "quality_score",
@@ -234,6 +244,19 @@ def _jsonb_condition_to_cel(cond_dict: dict[str, Any]) -> str:
             else f"action.context.{field_name}"
         )
 
+        # Comparison strings such as quality_score: "< 0.5", read the same way
+        # as the flat format's _parse_condition. Rendered as an equality they
+        # compared a number to a string and errored on every evaluation.
+        if cel_op is None and isinstance(value, str) and value.startswith(("<", ">", "=")):
+            match = re.match(r"([<>=!]+)\s*(.*)", value)
+            if match:
+                op_str, raw = match.groups()
+                cel_op = _COMPARISON_TO_CEL_OP.get(op_str, "==")
+                try:
+                    value = float(raw)
+                except ValueError:
+                    value = raw
+
         if cel_op:
             parts.append(f"{cel_field} {cel_op} {_cel_literal(value)}")
         else:
@@ -267,6 +290,13 @@ def _build_cel_activation(flat_ctx: dict[str, Any]) -> dict[str, Any]:
     action.setdefault("reason_count", 0)
     action.setdefault("pattern", "")
     action.setdefault("quality_score", 0.0)
+    # Record-phase fields: absent when checking an action before it is taken.
+    # A missing field is a CEL error, and errors now trigger the rule.
+    action.setdefault("phase", "")
+    action.setdefault("deliberation_inputs_count", 0)
+    action.setdefault("has_deliberation", False)
+    action.setdefault("has_reasoning", False)
+    action.setdefault("project", "")
     action["has_tags"] = bool(action.get("tags"))
     action["has_pattern"] = bool(action.get("pattern"))
     action["context"] = extra
@@ -277,6 +307,10 @@ def _build_cel_activation(flat_ctx: dict[str, Any]) -> dict[str, Any]:
 _logger = logging.getLogger(__name__)
 
 
+class CelEvaluationError(Exception):
+    """A guardrail's CEL expression could not be compiled or evaluated."""
+
+
 class CelGuardrailEvaluator:
     """F054: Evaluate guardrail CEL expressions.
 
@@ -284,9 +318,8 @@ class CelGuardrailEvaluator:
     Builds a structured activation context (action.*) from the flat
     evaluation context dict used by evaluate_guardrails().
 
-    Fails open: if a CEL expression is invalid or raises an error during
-    evaluation, the guardrail is skipped (not triggered) and a warning is
-    logged.
+    Raises CelEvaluationError when an expression is invalid or errors during
+    evaluation, so the caller can fail closed instead of skipping the rule.
     """
 
     def __init__(self) -> None:
@@ -319,11 +352,14 @@ class CelGuardrailEvaluator:
         """Evaluate a CEL expression against the flat context.
 
         Returns True if the guardrail should trigger, False otherwise.
-        On any error (compile or runtime) returns False (fail open).
+
+        Raises:
+            CelEvaluationError: The expression does not compile (or CEL is
+                not installed) or raised during evaluation.
         """
         prog = self._get_program(expression)
         if prog is None:
-            return False
+            raise CelEvaluationError(f"guardrail {guardrail_id!r}: expression does not compile")
 
         activation_data = _build_cel_activation(flat_ctx)
         try:
@@ -337,7 +373,7 @@ class CelGuardrailEvaluator:
                 expression,
                 exc,
             )
-            return False  # fail open
+            raise CelEvaluationError(f"guardrail {guardrail_id!r}: {exc}") from exc
 
 
 # Module-level evaluator (program cache persists across calls)
@@ -598,11 +634,20 @@ async def evaluate_guardrails(
     for g in guardrails:
         if g.cel_expression is not None:
             # F054: CEL evaluation path
-            triggered = _cel_evaluator.evaluate(g.id, g.cel_expression, context)
+            try:
+                triggered = _cel_evaluator.evaluate(g.id, g.cel_expression, context)
+                eval_failed = False
+            except CelEvaluationError:
+                # Fail closed: a rule that cannot be evaluated applies, so a
+                # broken block rule blocks instead of silently allowing.
+                triggered = eval_failed = True
             if triggered:
-                message = g.message or f"Guardrail {g.id} triggered"
-                for k, v in context.items():
-                    message = message.replace(f"{{{k}}}", str(v))
+                if eval_failed:
+                    message = f"Guardrail {g.id} could not be evaluated, so it was applied"
+                else:
+                    message = g.message or f"Guardrail {g.id} triggered"
+                    for k, v in context.items():
+                        message = message.replace(f"{{{k}}}", str(v))
                 gr = GuardrailResult(
                     guardrail_id=g.id,
                     name=g.description or g.id,

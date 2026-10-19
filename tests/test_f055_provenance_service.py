@@ -54,6 +54,7 @@ from a2a.cstp.provenance.mapping import (
     apply_rules,
     load_rules,
 )
+from a2a.cstp.access import PermissionDeniedError
 from a2a.cstp.provenance_service import (
     export_evidence_bundle,
     ingest_evidence,
@@ -61,6 +62,7 @@ from a2a.cstp.provenance_service import (
     map_controls,
     verify_evidence_chain,
 )
+from a2a.cstp.storage.factory import get_decision_store
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -136,6 +138,11 @@ def bundle_dir(tmp_path, monkeypatch):
     path = tmp_path / "bundles"
     monkeypatch.setattr(_svc, "DEFAULT_BUNDLE_DIR", str(path))
     return path
+
+
+async def _record(decision_id, recorded_by):
+    """Store a decision so linkEvidence can find it and check who owns it."""
+    await get_decision_store().save(decision_id, {"recorded_by": recorded_by})
 
 
 def _make_event(seq, event_type, payload, evidence_class="observed", ts="2026-07-01T00:00:00Z"):
@@ -1010,6 +1017,18 @@ class TestInsufficientEvidence:
 
 class TestIngestEvidence:
     @pytest.mark.asyncio
+    async def test_ingest_stamps_the_sending_agent(self, service_params):
+        params = {
+            **service_params,
+            "events": [{"event_type": "pr_review_approved",
+                        "payload": {"actor_is_human": True, "ingested_by": "forged"},
+                        "ts": "2026-01-01T00:00:00Z"}],
+        }
+        await ingest_evidence(params, "ci-bot")
+        [event] = get_events(service_params["db_path"])
+        assert event["payload"]["ingested_by"] == "ci-bot"
+
+    @pytest.mark.asyncio
     async def test_ingest_single_event(self, service_params):
         params = {
             **service_params,
@@ -1104,6 +1123,25 @@ class TestIngestEvidence:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestLinkEvidence:
+    @pytest.fixture(autouse=True)
+    async def _decisions(self):
+        for decision_id in ("dec-abc123", "d1", "dec-xyz", "dec-1", "dec-2"):
+            await _record(decision_id, "agent-1")
+
+    @pytest.mark.asyncio
+    async def test_link_rejects_unknown_decision(self, service_params_observed):
+        params = {**service_params_observed, "decision_id": "doesnotexist", "event_seqs": [1]}
+        with pytest.raises(ValueError, match="not found"):
+            await link_evidence(params, "agent-1")
+
+    @pytest.mark.asyncio
+    async def test_link_rejects_another_agents_decision(self, db_with_observed,
+                                                       service_params_observed):
+        params = {**service_params_observed, "decision_id": "dec-abc123", "event_seqs": [1]}
+        with pytest.raises(PermissionDeniedError):
+            await link_evidence(params, "agent-2")
+        assert get_events(db_with_observed, evidence_class="attested") == []
+
     @pytest.mark.asyncio
     async def test_link_creates_attested_event(self, db_with_observed, service_params_observed):
         params = {
@@ -1532,6 +1570,7 @@ class TestEndToEndWorkflow:
         assert ingest_result["ingested"] == 3
 
         # 2. Link a CSTP decision to observed events
+        await _record("dec-workflow-test", "test-agent")
         link_result = await link_evidence({
             "decision_id": "dec-workflow-test",
             "event_seqs": [1, 2, 3],

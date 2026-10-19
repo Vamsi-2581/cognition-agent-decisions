@@ -17,6 +17,14 @@ Cognition Engines supports configuration through three sources (in order of prec
 | `GEMINI_API_KEY` | Google Gemini API key for text embeddings | `AIza...` |
 | `CSTP_AUTH_TOKENS` | Comma-separated `agent:token` pairs | `emerson:abc123,claude:xyz789` |
 
+### Optional
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CSTP_ADMIN_AGENTS` | empty | Comma-separated agents with the [admin role](#admin-role) |
+| `CSTP_TRACKER_MAX_SESSIONS_PER_AGENT` | `200` | Open deliberation sessions one agent may hold; the least recently active is dropped past it |
+| `CSTP_TRACKER_MAX_INPUTS_PER_SESSION` | `100` | Inputs one deliberation session keeps; the oldest is dropped past it |
+
 ### Server
 
 | Variable | Default | Description |
@@ -129,6 +137,31 @@ auth:
       token: xyz789
 ```
 
+### Admin Role
+
+Every agent may read the shared decision store, but may change only the decisions it
+recorded. Agents listed as admins may also change any agent's decisions, see every
+deliberation session in `cstp.debugTracker`, and run the operator methods that affect all
+agents: `cstp.resetCircuit`, `cstp.reindex`, `cstp.attributeOutcomes` and
+`cstp.ingestEvidence`.
+
+```yaml
+auth:
+  tokens:
+    - agent: emerson
+      token: ${EMERSON_TOKEN}
+    - agent: dashboard
+      token: ${DASHBOARD_TOKEN}
+  admins: [dashboard]
+```
+
+or `CSTP_ADMIN_AGENTS=dashboard`. The dashboard's `CSTP_TOKEN` needs an admin agent for its
+breaker Reset button and Deliberation page. Give agents that act on their own a separate,
+non-admin token: an admin token can reset a tripped breaker or ingest the "observed"
+evidence that control mappings treat as independent, such as human PR approvals.
+
+With auth disabled every caller is an admin.
+
 ### Disabling Auth
 
 For development or testing:
@@ -142,9 +175,9 @@ auth:
 
 ### MCP Authentication
 
-The MCP Streamable HTTP transport at `/mcp` checks the same bearer token as the JSON-RPC `/cstp` endpoint, so one `CSTP_AUTH_TOKENS` configuration covers both. A request without a valid `Authorization: Bearer` header gets `401` before it reaches any MCP tool.
+The MCP Streamable HTTP transport at `/mcp` checks the same bearer token as the JSON-RPC `/cstp` endpoint, so one `CSTP_AUTH_TOKENS` configuration covers both. A request without a valid `Authorization: Bearer` header gets `401` before it reaches any MCP tool. Tools act as the token's agent; their `agent_id` argument only labels deliberation buckets within it.
 
-The stdio transport (`python -m a2a.mcp_server`) does not use bearer tokens — it relies on the process-level security of the hosting environment (e.g., Docker container isolation).
+The stdio transport (`python -m a2a.mcp_server`) does not use bearer tokens — it relies on the process-level security of the hosting environment (e.g., Docker container isolation). Its tools act as the agent `mcp-client`, without the admin role.
 
 ---
 

@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .access import require_decision_owner
 from .provenance.mapping import (
     MAPPINGS_DIR,
     MappingResult,
@@ -89,7 +90,9 @@ async def ingest_evidence(params: dict[str, Any], agent_id: str) -> dict[str, An
         source   — default source label if not specified per-event (default: "external")
 
     All ingested events receive evidence_class='observed'. The caller cannot override
-    this — observed events must come from external systems only.
+    this — observed events must come from external systems only. Each payload is
+    stamped with `ingested_by`, the authenticated agent that sent it, so a forged
+    event stays attributable.
 
     The entire batch is validated before any event is committed. If any event is
     invalid, no events are appended (atomic batch semantics).
@@ -126,6 +129,7 @@ async def ingest_evidence(params: dict[str, Any], agent_id: str) -> dict[str, An
 
         ts = ev.get("ts")
         source = ev.get("source") or default_source
+        payload = {**payload, "ingested_by": agent_id}
         validated.append((source, event_type, EVIDENCE_CLASS_OBSERVED, payload, ts))
 
     # Append atomically in one transaction (finding 11)
@@ -152,7 +156,8 @@ async def link_evidence(params: dict[str, Any], agent_id: str) -> dict[str, Any]
     decision store, not a hash chain.
 
     Params:
-        decision_id  — CSTP decision ID to correlate
+        decision_id  — CSTP decision ID to correlate; must exist and have been
+                       recorded by the caller (admins may link any decision)
         event_seqs   — list of observed event sequence numbers being linked
         stakes       — stakes level from the CSTP decision (optional, for mapping)
         has_outcome  — whether the decision has a recorded outcome (optional)
@@ -168,6 +173,7 @@ async def link_evidence(params: dict[str, Any], agent_id: str) -> dict[str, Any]
     decision_id = params.get("decision_id")
     if not decision_id:
         raise ValueError("'decision_id' is required")
+    await require_decision_owner(decision_id, agent_id, must_exist=True)
 
     event_seqs = params.get("event_seqs", [])
     if not isinstance(event_seqs, list):
