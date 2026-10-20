@@ -192,9 +192,9 @@ curl -X POST http://localhost:8100/cstp \
 The F055 provenance methods are JSON-RPC only — they have no MCP tool equivalents.
 
 Every call acts as the agent its bearer token maps to. An agent may change only the
-decisions it recorded; `resetCircuit`, `reindex`, `attributeOutcomes` and `ingestEvidence`
-need an agent listed in `CSTP_ADMIN_AGENTS` (or `auth.admins`), and the dashboard's token must
-be one. See [Identity and Permissions](website/reference/api.md#identity-and-permissions).
+decisions it recorded; `resetCircuit`, `reindex`, `attributeOutcomes`, `ingestEvidence` and
+`exportEvidenceBundle` need an agent listed in `CSTP_ADMIN_AGENTS` (or `auth.admins`), and the
+dashboard's token must be one. See [Identity and Permissions](website/reference/api.md#identity-and-permissions).
 
 ### Auto-Linking
 
@@ -291,8 +291,9 @@ the caller passed under `action.context.*`. Full boolean logic, comparisons, `in
 `contains()` are available.
 
 Legacy key/value conditions are auto-converted to CEL at evaluation time, so existing guardrail
-files keep working unchanged — no migration needed. Evaluation **fails open**: a guardrail whose
-expression fails to compile or raises at runtime is skipped and logged, never treated as a block.
+files keep working unchanged — no migration needed. Evaluation **fails closed**: a guardrail whose
+expression fails to compile or raises at runtime applies (a block rule blocks) and is logged as
+"could not be evaluated". Guard optional `action.context.*` fields with `has()`.
 
 See the [guardrails authoring guide](https://cognition-engines.ai/reference/guardrails-authoring) for
 the full field reference.

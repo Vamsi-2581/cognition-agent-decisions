@@ -142,8 +142,8 @@ auth:
 Every agent may read the shared decision store, but may change only the decisions it
 recorded. Agents listed as admins may also change any agent's decisions, see every
 deliberation session in `cstp.debugTracker`, and run the operator methods that affect all
-agents: `cstp.resetCircuit`, `cstp.reindex`, `cstp.attributeOutcomes` and
-`cstp.ingestEvidence`.
+agents: `cstp.resetCircuit`, `cstp.reindex`, `cstp.attributeOutcomes`, `cstp.ingestEvidence`
+and `cstp.exportEvidenceBundle`.
 
 ```yaml
 auth:
@@ -177,7 +177,7 @@ auth:
 
 The MCP Streamable HTTP transport at `/mcp` checks the same bearer token as the JSON-RPC `/cstp` endpoint, so one `CSTP_AUTH_TOKENS` configuration covers both. A request without a valid `Authorization: Bearer` header gets `401` before it reaches any MCP tool. Tools act as the token's agent; their `agent_id` argument only labels deliberation buckets within it.
 
-The stdio transport (`python -m a2a.mcp_server`) does not use bearer tokens — it relies on the process-level security of the hosting environment (e.g., Docker container isolation). Its tools act as the agent `mcp-client`, without the admin role.
+The stdio transport (`python -m a2a.mcp_server`) does not use bearer tokens — it relies on the process-level security of the hosting environment (e.g., Docker container isolation). Its tools act as the agent `mcp-client` with the admin role, as with auth disabled: the local user already has the database.
 
 ---
 

@@ -24,6 +24,12 @@ class AuthToken:
     agent: str
     token: str
 
+    def __post_init__(self) -> None:
+        # Deliberation tracker keys are namespaced "{agent}|...", so a "|" in a
+        # name would let agent "a" read and consume agent "a|b"'s sessions.
+        if "|" in self.agent:
+            raise ValueError(f"Agent name may not contain '|': {self.agent!r}")
+
 
 @dataclass(slots=True)
 class AuthConfig:
@@ -33,7 +39,8 @@ class AuthConfig:
         enabled: Whether authentication is required.
         tokens: List of valid tokens.
         admins: Agents allowed to run operator methods (resetCircuit, reindex,
-            attributeOutcomes, ingestEvidence), see every tracker session, and
+            attributeOutcomes, ingestEvidence, exportEvidenceBundle), see every
+            tracker session, and
             change decisions other agents recorded.
     """
 

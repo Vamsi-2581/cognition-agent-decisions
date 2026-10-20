@@ -590,18 +590,8 @@ async def _handle_check_guardrails(params: dict[str, Any], agent_id: str) -> dic
     # Parse request
     request = CheckGuardrailsRequest.from_params(params)
 
-    # Build evaluation context
-    context: dict[str, Any] = {
-        "category": request.action.category,
-        "stakes": request.action.stakes,
-        "confidence": request.action.confidence,
-    }
-    # Merge additional context
-    if request.action.context:
-        context.update(request.action.context)
-
     # Evaluate guardrails
-    eval_result = await evaluate_guardrails(context)
+    eval_result = await evaluate_guardrails(request.action.guardrail_context(agent_id))
 
     # Audit log
     log_guardrail_check(
@@ -1148,7 +1138,12 @@ async def _handle_map_controls(params: dict[str, Any], agent_id: str) -> dict[st
 async def _handle_export_evidence_bundle(
     params: dict[str, Any], agent_id: str
 ) -> dict[str, Any]:
-    """Handle cstp.exportEvidenceBundle method (F055)."""
+    """Handle cstp.exportEvidenceBundle method (F055).
+
+    Admin only: it writes bundle files on the server and records the chain
+    head that verifyEvidenceChain later checks against.
+    """
+    require_admin(agent_id, "cstp.exportEvidenceBundle")
     return await export_evidence_bundle(params, agent_id)
 
 
@@ -1561,7 +1556,9 @@ async def _handle_review_decision(params: dict[str, Any], agent_id: str) -> dict
                 cb_context: dict[str, Any] = {
                     "category": dec_data.get("category"),
                     "stakes": dec_data.get("stakes"),
-                    "agent_id": dec_data.get("agent_id", agent_id),
+                    # The outcome counts against the agent that recorded the
+                    # decision, not whoever reviews it (an admin, the dashboard).
+                    "agent_id": dec_data.get("recorded_by"),
                     "tags": dec_data.get("tags", []),
                 }
                 await mgr.record_outcome(

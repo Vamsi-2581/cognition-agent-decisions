@@ -58,13 +58,7 @@ async def pre_action(
     # --- Build inputs for concurrent calls ---
 
     # Guardrail evaluation context
-    guardrail_context: dict[str, Any] = {
-        "category": action.category,
-        "stakes": action.stakes,
-        "confidence": action.confidence,
-    }
-    if action.context:
-        guardrail_context.update(action.context)
+    guardrail_context = action.guardrail_context(agent_id)
 
     # Calibration request scoped to this category
     cal_request = GetCalibrationRequest(category=action.category)
@@ -142,8 +136,11 @@ async def pre_action(
     guardrail_violations: list[GuardrailViolation] = []
 
     if isinstance(guardrail_result, Exception):
+        # Fail closed: a caller who could make evaluation raise would otherwise
+        # pass every block rule and open circuit breaker.
         logger.warning("Guardrail evaluation failed: %s", guardrail_result)
-        # Fail open: allow if guardrails error
+        allowed = False
+        block_reasons.append("Guardrails could not be evaluated, so the action is blocked")
     else:
         allowed = guardrail_result.allowed
         for v in guardrail_result.violations:

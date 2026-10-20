@@ -368,3 +368,36 @@ class TestStdioInitializesGraphStore:
             await mcp_server.run_stdio()
 
         assert served == [True]
+
+
+class TestStdioLocalUserIsAdmin:
+    """The stdio user has no token, so it gets the admin role, as with auth off.
+
+    Without it the local user could not review or update decisions recorded
+    before identity came from the token (under subagent labels).
+    """
+
+    async def test_local_agent_is_admin_while_serving(self) -> None:
+        import contextlib
+        from unittest.mock import patch
+
+        from a2a import mcp_server
+        from a2a.cstp.access import is_admin
+
+        seen: list[bool] = []
+
+        @contextlib.asynccontextmanager
+        async def _fake_stdio():
+            yield (object(), object())
+
+        async def _fake_run(*args: object, **kwargs: object) -> None:
+            seen.append(is_admin(mcp_server.LOCAL_AGENT_ID))
+
+        with (
+            patch.object(mcp_server, "stdio_server", _fake_stdio),
+            patch.object(mcp_server.mcp_app, "run", _fake_run),
+            patch.object(mcp_server.mcp_app, "create_initialization_options", lambda: {}),
+        ):
+            await mcp_server.run_stdio()
+
+        assert seen == [True]

@@ -130,6 +130,11 @@ class TestJsonbConditionToCel:
         # The "cel" key should be skipped in conversion
         assert result == "true"
 
+    def test_context_field_is_guarded_with_has(self):
+        assert _jsonb_condition_to_cel({"deploy_env": "production"}) == (
+            "has(action.context.deploy_env) && action.context.deploy_env == 'production'"
+        )
+
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
@@ -438,6 +443,29 @@ async def test_invalid_cel_fails_closed(tmp_path):
     [violation] = result.violations
     assert violation.guardrail_id == "broken-cel"
     assert "could not be evaluated" in violation.message
+
+
+@pytest.mark.asyncio
+async def test_dict_condition_on_unsent_context_field_is_unmet(tmp_path):
+    """Fail-closed must not turn an optional context field into a blanket block."""
+    yaml_content = """
+- id: prod-high
+  description: High-stakes production deploys
+  condition:
+    deploy_env: production
+    stakes: high
+  action: block
+  message: Blocked
+"""
+    (tmp_path / "test.yaml").write_text(yaml_content, encoding="utf-8")
+
+    without = await evaluate_guardrails({"stakes": "high"}, guardrails_dir=tmp_path)
+    production = await evaluate_guardrails(
+        {"stakes": "high", "deploy_env": "production"}, guardrails_dir=tmp_path
+    )
+
+    assert without.allowed
+    assert not production.allowed
 
 
 @pytest.mark.asyncio

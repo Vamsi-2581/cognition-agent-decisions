@@ -60,8 +60,8 @@ add thoughts to those buckets or consume them.
 - **Only your own decisions.** `updateDecision`, `reviewDecision`, `setPreserve`,
   `linkEvidence`, and `recordThought` appending to a recorded decision require the decision
   to have been recorded by the caller.
-- **Admin only.** `resetCircuit`, `reindex`, `attributeOutcomes` and `ingestEvidence` require
-  an agent listed in `auth.admins` (`CSTP_ADMIN_AGENTS`; see
+- **Admin only.** `resetCircuit`, `reindex`, `attributeOutcomes`, `ingestEvidence` and
+  `exportEvidenceBundle` require an agent listed in `auth.admins` (`CSTP_ADMIN_AGENTS`; see
   [Configuration](./configuration.md#admin-role)). Admins may also change any agent's
   decisions.
 - **`debugTracker`** shows an agent only its own sessions; admins see every session.
@@ -926,6 +926,9 @@ requiring human review (`MV-3`, `MEASURE-2.5`) fail closed unless `actor_is_huma
 ---
 
 ### `cstp.exportEvidenceBundle` — Export the Auditor Bundle
+
+Admin only: it writes bundle files on the server and records the chain head that
+`cstp.verifyEvidenceChain` later checks against.
 
 **Parameters:**
 

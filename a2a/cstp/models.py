@@ -8,7 +8,7 @@ from typing import Any
 # extraction synchronously on the (single-worker) event loop, so an unbounded
 # field let one request stall every other caller. MAX_TEXT_CHARS applies to the
 # decision / action description, the pattern, each reason's text, and each
-# recorded thought (which the deliberation tracker holds in memory).
+# recorded thought and query (which the deliberation tracker holds in memory).
 MAX_TEXT_CHARS = 10_000
 MAX_CONTEXT_CHARS = 50_000
 
@@ -93,6 +93,9 @@ class QueryDecisionsRequest:
         """Create request from JSON-RPC params."""
         query = params.get("query", "")
         # Allow empty query for listing all decisions
+        # The deliberation tracker keeps each query in memory.
+        if len(query) > MAX_TEXT_CHARS:
+            raise ValueError(f"query: must be at most {MAX_TEXT_CHARS} characters")
 
         limit = params.get("limit", params.get("top_k", 10))
         # Higher limit allowed for empty queries (list-all mode)
@@ -249,13 +252,38 @@ class ActionContext:
         context = data.get("context", {})
         context.update(extra)
 
+        # A non-numeric confidence made guardrail evaluation raise, and
+        # preAction allowed the action whenever evaluation failed.
+        confidence = data.get("confidence")
+        if confidence is not None:
+            try:
+                confidence = float(confidence)
+            except (TypeError, ValueError):
+                raise ValueError("action.confidence: must be a number") from None
+
         return cls(
             description=description,
             category=data.get("category"),
             stakes=data.get("stakes", "medium"),
-            confidence=data.get("confidence"),
+            confidence=confidence,
             context=context,
         )
+
+    def guardrail_context(self, agent_id: str) -> dict[str, Any]:
+        """Build the guardrail evaluation context for this action.
+
+        Free-form context goes in first so it cannot override the structured
+        fields, and `agent_id` is the authenticated caller. Otherwise a caller
+        could send context {"stakes": "low"} or {"agent_id": "someone-else"}
+        and pass block rules and agent-scoped circuit breakers.
+        """
+        return {
+            **self.context,
+            "category": self.category,
+            "stakes": self.stakes,
+            "confidence": self.confidence,
+            "agent_id": agent_id,
+        }
 
 
 @dataclass(slots=True)

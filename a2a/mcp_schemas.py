@@ -59,6 +59,7 @@ class QueryDecisionsInput(BaseModel):
     query: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Natural language query to find similar past decisions",
     )
     limit: int = Field(

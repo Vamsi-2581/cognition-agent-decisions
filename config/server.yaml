@@ -22,8 +22,8 @@ auth:
       token: "${CSTP_TOKEN_EMERSON}"
     - agent: "test"
       token: "test-token-for-development"
-  # Agents that may reset breakers, reindex, attribute outcomes, ingest evidence,
-  # see every deliberation session, and change other agents' decisions. The
+  # Agents that may reset breakers, reindex, attribute outcomes, ingest and
+  # export evidence, see every deliberation session, and change other agents' decisions. The
   # dashboard's token needs one of these names.
   admins: []
 

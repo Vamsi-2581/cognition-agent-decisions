@@ -257,10 +257,14 @@ def _jsonb_condition_to_cel(cond_dict: dict[str, Any]) -> str:
                 except ValueError:
                     value = raw
 
-        if cel_op:
-            parts.append(f"{cel_field} {cel_op} {_cel_literal(value)}")
+        comparison = f"{cel_field} {cel_op or '=='} {_cel_literal(value)}"
+        if field_name in _STANDARD_ACTION_FIELDS:
+            parts.append(comparison)
         else:
-            parts.append(f"{cel_field} == {_cel_literal(value)}")
+            # Context fields are optional. A condition on one the caller did not
+            # send is unmet; without has() the lookup errors and, now that
+            # errors apply the rule, would block every such action.
+            parts.append(f"has({cel_field}) && {comparison}")
 
     return " && ".join(parts) if parts else "true"
 
@@ -361,9 +365,8 @@ class CelGuardrailEvaluator:
         if prog is None:
             raise CelEvaluationError(f"guardrail {guardrail_id!r}: expression does not compile")
 
-        activation_data = _build_cel_activation(flat_ctx)
         try:
-            activation = celpy.json_to_cel(activation_data)
+            activation = celpy.json_to_cel(_build_cel_activation(flat_ctx))
             result = prog.evaluate(activation)
             return bool(result)
         except Exception as exc:

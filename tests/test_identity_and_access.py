@@ -90,6 +90,11 @@ async def _stored(decision_id: str) -> dict[str, Any]:
 
 
 class TestDecisionOwnership:
+    async def test_agent_id_param_does_not_set_recorded_by(self, dispatcher) -> None:
+        decision_id = await _record(dispatcher, "bob", agentId="alice")
+
+        assert (await _stored(decision_id))["recorded_by"] == "bob"
+
     async def test_update_by_another_agent_is_denied(self, dispatcher) -> None:
         decision_id = await _record(dispatcher, "alice")
 
@@ -146,18 +151,20 @@ class TestDecisionOwnership:
 
 
 class TestAdminOperations:
-    @pytest.mark.parametrize(
-        "method",
-        ["cstp.resetCircuit", "cstp.reindex", "cstp.attributeOutcomes", "cstp.ingestEvidence"],
-    )
+    ADMIN_METHODS = [
+        "cstp.resetCircuit",
+        "cstp.reindex",
+        "cstp.attributeOutcomes",
+        "cstp.ingestEvidence",
+        "cstp.exportEvidenceBundle",
+    ]
+
+    @pytest.mark.parametrize("method", ADMIN_METHODS)
     async def test_agents_are_denied(self, dispatcher, method: str) -> None:
         response = await _call(dispatcher, "bob", method, {})
         assert response.error.code == PERMISSION_DENIED
 
-    @pytest.mark.parametrize(
-        "method",
-        ["cstp.resetCircuit", "cstp.reindex", "cstp.attributeOutcomes", "cstp.ingestEvidence"],
-    )
+    @pytest.mark.parametrize("method", ADMIN_METHODS)
     async def test_admins_get_past_the_check(self, dispatcher, method: str) -> None:
         # Empty params may still fail validation; only the role check matters here.
         response = await _call(dispatcher, "ops", method, {})
@@ -227,6 +234,118 @@ class TestDeliberationIsolation:
             "text": "x" * (MAX_TEXT_CHARS + 1),
         })
         assert response.error.code == INVALID_PARAMS
+
+
+HIGH_STAKES_LOW_CONFIDENCE = {
+    "description": "Ship the migration tonight",
+    "stakes": "high",
+    "confidence": 0.3,
+}
+
+
+class TestGuardrailContext:
+    """A caller's free-form context must not talk guardrails out of a block."""
+
+    async def test_context_cannot_override_structured_fields(self, dispatcher) -> None:
+        action = {**HIGH_STAKES_LOW_CONFIDENCE, "context": {"stakes": "low", "confidence": 0.9}}
+
+        check = await _call(dispatcher, "bob", "cstp.checkGuardrails", {"action": action})
+        pre = await _call(dispatcher, "bob", "cstp.preAction", {
+            "action": action, "options": {"autoRecord": False},
+        })
+
+        assert check.result["allowed"] is False
+        assert pre.result["allowed"] is False
+
+    async def test_non_numeric_confidence_is_rejected(self, dispatcher) -> None:
+        # Without auto-record, the old code let evaluation raise and allowed.
+        response = await _call(dispatcher, "bob", "cstp.preAction", {
+            "action": {**HIGH_STAKES_LOW_CONFIDENCE, "confidence": "x"},
+            "options": {"autoRecord": False},
+        })
+        assert response.error.code == INVALID_PARAMS
+
+    async def test_pre_action_blocks_when_guardrails_cannot_be_evaluated(
+        self, dispatcher, monkeypatch
+    ) -> None:
+        async def broken(context: dict[str, Any]) -> Any:
+            raise RuntimeError("evaluation failed")
+
+        monkeypatch.setattr("a2a.cstp.preaction_service.evaluate_guardrails", broken)
+
+        response = await _call(dispatcher, "bob", "cstp.preAction", {
+            "action": {"description": "Pin pytest", "category": "tooling"},
+        })
+
+        assert response.result["allowed"] is False
+        assert response.result["decisionId"] is None
+
+    @pytest.mark.parametrize(
+        ("method", "target"),
+        [
+            ("cstp.checkGuardrails", "a2a.cstp.dispatcher.evaluate_guardrails"),
+            ("cstp.preAction", "a2a.cstp.preaction_service.evaluate_guardrails"),
+        ],
+    )
+    async def test_agent_breakers_see_the_token_agent(
+        self, dispatcher, monkeypatch, method: str, target: str
+    ) -> None:
+        from a2a.cstp.guardrails_service import EvaluationResult
+
+        seen: list[dict[str, Any]] = []
+
+        async def capture(context: dict[str, Any]) -> EvaluationResult:
+            seen.append(context)
+            return EvaluationResult(allowed=True, violations=[], warnings=[], evaluated=0)
+
+        monkeypatch.setattr(target, capture)
+
+        await _call(dispatcher, "bob", method, {
+            "action": {"description": "Deploy", "context": {"agent_id": "alice"}},
+            "options": {"autoRecord": False},
+        })
+
+        assert [c["agent_id"] for c in seen] == ["bob"]
+
+    async def test_reviewed_outcome_counts_against_the_recording_agent(
+        self, dispatcher, monkeypatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        outcomes: list[dict[str, Any]] = []
+
+        async def record_outcome(context: dict[str, Any], outcome: str) -> None:
+            outcomes.append(context)
+
+        async def manager() -> Any:
+            return SimpleNamespace(is_initialized=True, record_outcome=record_outcome)
+
+        monkeypatch.setattr(
+            "a2a.cstp.circuit_breaker_service.get_circuit_breaker_manager", manager
+        )
+        decision_id = await _record(dispatcher, "alice")
+
+        await _call(dispatcher, "ops", "cstp.reviewDecision", {
+            "id": decision_id, "outcome": "failure",
+        })
+
+        assert [c["agent_id"] for c in outcomes] == ["alice"]
+
+
+class TestQueryLimits:
+    async def test_query_text_is_capped(self, dispatcher) -> None:
+        response = await _call(dispatcher, "bob", "cstp.queryDecisions", {
+            "query": "a" * (MAX_TEXT_CHARS + 1),
+        })
+        assert response.error.code == INVALID_PARAMS
+
+    def test_mcp_query_text_is_capped(self) -> None:
+        from pydantic import ValidationError
+
+        from a2a.mcp_schemas import QueryDecisionsInput
+
+        with pytest.raises(ValidationError, match="at most"):
+            QueryDecisionsInput(query="a" * (MAX_TEXT_CHARS + 1))
 
 
 class TestInternalErrors:
@@ -301,6 +420,11 @@ class TestAdminConfig:
 
     def test_name_list_parsing(self) -> None:
         assert _parse_names("") == []
+
+    def test_agent_name_with_namespace_separator_is_rejected(self) -> None:
+        # Tracker keys are "{agent}|...": agent "a" would see agent "a|b"'s sessions.
+        with pytest.raises(ValueError, match=r"\|"):
+            AuthToken(agent="a|b", token="t")
 
 
 @pytest.mark.skipif(not MCP_INSTALLED, reason="mcp SDK not installed")

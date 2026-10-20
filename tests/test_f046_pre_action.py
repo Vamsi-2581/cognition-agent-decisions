@@ -431,7 +431,11 @@ class TestPreActionService:
         mock_guard: AsyncMock,
         mock_cal: AsyncMock,
     ) -> None:
-        """If services fail, should still return a valid response (fail open)."""
+        """If services fail, should still return a valid response.
+
+        Query and calibration failures degrade the response; a guardrail
+        failure blocks, since allowing would skip every block rule.
+        """
         mock_query.side_effect = RuntimeError("ChromaDB down")
         mock_guard.side_effect = RuntimeError("Guardrails error")
         mock_cal.side_effect = RuntimeError("Calibration error")
@@ -444,8 +448,9 @@ class TestPreActionService:
         })
         resp = await pre_action(req, agent_id="test-agent")
 
-        # Fail open: allowed when guardrails error
-        assert resp.allowed is True
+        # Fail closed: blocked when guardrails error
+        assert resp.allowed is False
+        assert resp.block_reasons
         assert resp.decision_id is None
         assert len(resp.relevant_decisions) == 0
 

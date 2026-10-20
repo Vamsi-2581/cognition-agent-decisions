@@ -34,7 +34,9 @@ a2a = [
     "pydantic>=2.0.0",
 ]
 mcp = [
-    "mcp>=1.0.0",
+    # 1.10 added RequestContext.request, which carries the authenticated agent
+    # from /mcp to the tool handlers.
+    "mcp>=1.10.0",
     "pydantic>=2.0.0",
 ]
 dev = [

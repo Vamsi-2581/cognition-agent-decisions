@@ -581,19 +581,8 @@ async def _handle_check_action(arguments: dict[str, Any]) -> list[TextContent]:
     params = _build_guardrails_params(args)
     request = CheckGuardrailsRequest.from_params(params)
 
-    # Build evaluation context (matches dispatcher pattern)
-    context: dict[str, Any] = {
-        "category": request.action.category,
-        "stakes": request.action.stakes,
-        "confidence": request.action.confidence,
-    }
-    if request.action.context:
-        # Merge additional context but don't overwrite explicit params
-        for k, v in request.action.context.items():
-            if k not in context:
-                context[k] = v
-
-    # Evaluate guardrails
+    # Evaluate guardrails (same context as the dispatcher builds)
+    context = request.action.guardrail_context(get_caller_agent_id())
     eval_result = await evaluate_guardrails(context)
 
     # Log the check
@@ -1271,6 +1260,12 @@ async def run_stdio() -> None:
 
     # Tool calls on this transport carry no HTTP request; they act as the
     # local user (LOCAL_AGENT_ID) instead of being refused as unauthenticated.
+    # There are no tokens here, as with auth disabled, so that user is an admin
+    # and can still change decisions recorded under older or other names.
+    from .auth import AuthManager, set_auth_manager
+    from .config import AuthConfig, Config
+
+    set_auth_manager(AuthManager(Config(auth=AuthConfig(enabled=False))))
     global _stdio_transport
     _stdio_transport = True
     try:

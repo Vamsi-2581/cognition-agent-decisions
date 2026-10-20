@@ -148,9 +148,13 @@ guardrail files keep working with no migration:
 | `reason_count_lt: 1` | `action.reason_count < 1` |
 | `quality_lt: 0.5` | `action.quality_score < 0.5` |
 | `category: tooling` | `action.category == 'tooling'` |
+| `quality_score: "< 0.5"` | `action.quality_score < 0.5` |
+| `deploy_env: production` | `has(action.context.deploy_env) && action.context.deploy_env == 'production'` |
 
-Suffixes `_lt`, `_gt`, `_lte`, and `_gte` map to `<`, `>`, `<=`, and `>=`. Keys that are not
-recognized activation fields resolve to `action.context.<key>`. Multiple keys are joined with `&&`.
+Suffixes `_lt`, `_gt`, `_lte`, and `_gte` map to `<`, `>`, `<=`, and `>=`, as do string values
+that start with a comparison (`"< 0.5"`). Keys that are not recognized activation fields resolve
+to `action.context.<key>`, guarded with `has()` so a condition on a field the caller did not send
+is simply unmet. Multiple keys are joined with `&&`.
 
 ::: warning A `condition:` key disables the flat format
 When `condition:` is present, the guardrail is evaluated **only** through CEL — sibling
@@ -158,11 +162,19 @@ When `condition:` is present, the guardrail is evaluated **only** through CEL �
 parsed) or fold the requirement into the expression as `!action.context.<field>`.
 :::
 
-::: tip Fails open
-An expression that fails to compile, or raises at runtime, is skipped and a warning is logged —
-it never blocks. A broken rule silently stops enforcing, so check server logs for
-`CEL compile error` / `CEL eval error` after editing. The same applies if `cel-python` is not
-installed: every CEL guardrail is skipped.
+::: warning Fails closed
+An expression that fails to compile, or raises at runtime, **applies**: a `block` rule blocks and
+a `warn` rule warns, with the message "Guardrail <id> could not be evaluated, so it was applied".
+Reading an `action.context.*` field the caller did not send is a runtime error, so guard optional
+fields with `has()`:
+
+```yaml
+condition: "action.stakes == 'critical' && has(action.context.hour) && action.context.hour >= 22"
+```
+
+Leave the guard off when a missing field should count against the action, as in
+`!action.context.backtest_completed` above. Check server logs for `CEL compile error` /
+`CEL eval error` after editing. If `cel-python` is not installed, every CEL guardrail applies.
 :::
 
 CEL evaluation runs only in `cstp.checkGuardrails` (and the `pre_action` path that calls it). It is

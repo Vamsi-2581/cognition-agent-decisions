@@ -53,7 +53,7 @@ New `CelGuardrailEvaluator` class:
 - Compiles CEL expressions once, caches programs
 - Builds activation context from action parameters
 - Evaluates all active guardrails, returns blocked/warned
-- Fails open on eval errors (log + skip, don't block)
+- Fails open on eval errors (log + skip, don't block) — reversed, see D1
 
 ### 3. CEL Activation Context
 
@@ -133,7 +133,7 @@ action.reason_count < 1 && action.stakes in ['medium', 'high', 'critical']
 ### New guardrails enabled by CEL
 ```cel
 # Block high-stakes decisions at night (context.hour set by caller)
-action.stakes == 'critical' && action.context.hour >= 22
+action.stakes == 'critical' && has(action.context.hour) && action.context.hour >= 22
 
 # Require 2+ reasons for high-stakes
 action.stakes == 'high' && action.reason_count < 2
@@ -202,6 +202,12 @@ activation field reference.
 
 ### D1: Fail open
 Invalid expressions don't block. Better to miss a guardrail than brick all decisions. Errors logged for admin to fix.
+
+**Reversed.** Failing open let a broken block rule allow everything, and hid that three shipped
+rules never evaluated: the record-phase fields were missing outside the record step, and
+`quality_score: "< 0.5"` became a string equality. Errors now apply the rule. The activation
+defaults every record-phase field, and dict conditions guard context fields with `has()`, so a
+well-formed rule does not error on input the caller left out.
 
 ### D2: `action` namespace (not `decision`)
 CE uses "action" terminology in guardrails. Nous uses "decision". Each project uses its own convention. CE expressions use `action.*`, Nous uses `decision.*`.
