@@ -432,7 +432,8 @@ class TestNonFiniteNumbers:
     """One stored NaN or infinity made getDecision, listDecisions or getGraph
     fail to serialize for every agent."""
 
-    def test_nan_literal_in_a_cstp_body_is_a_parse_error(self) -> None:
+    @pytest.mark.parametrize("literal", [b"Infinity", b"NaN", b"-Infinity", b"1e999", b"-1e999"])
+    def test_non_finite_literal_in_a_cstp_body_is_a_parse_error(self, literal: bytes) -> None:
         from fastapi.testclient import TestClient
 
         from a2a.server import create_app
@@ -442,7 +443,8 @@ class TestNonFiniteNumbers:
                 "/cstp",
                 content=b'{"jsonrpc": "2.0", "id": 1, "method": "cstp.recordDecision",'
                 b' "params": {"decision": "x", "confidence": 0.8, "category": "process",'
-                b' "reasons": [{"type": "analysis", "text": "t", "strength": Infinity}]}}',
+                b' "bridge": {"structure": "s", "function": "f", "tolerance": ['
+                + literal + b"]}}}",
                 headers={
                     "Authorization": f"Bearer {TOKENS['alice']}",
                     "Content-Type": "application/json",

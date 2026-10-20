@@ -6,6 +6,7 @@ and MCP tools via Streamable HTTP transport.
 
 import json
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -206,6 +207,14 @@ def _reject_constant(name: str) -> float:
     raise ValueError(f"{name} is not valid JSON")
 
 
+def _parse_finite_float(text: str) -> float:
+    """`json.loads` hook that refuses number literals overflowing to infinity."""
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError(f"{text} is out of range")
+    return number
+
+
 def _mount_mcp(app: FastAPI) -> None:
     """Mount the MCP Streamable HTTP handler at /mcp.
 
@@ -304,10 +313,15 @@ def _register_routes(app: FastAPI) -> None:
             JSON-RPC response.
         """
         # Parse request body. NaN and Infinity are not JSON, but json.loads
-        # accepts them; stored on a decision or graph edge they make every
-        # later response that includes it fail to serialize, for every agent.
+        # accepts them, and a literal like 1e999 overflows to infinity; stored
+        # on a decision or graph edge, such a value makes every later response
+        # that includes it fail to serialize, for every agent.
         try:
-            body = json.loads(await request.body(), parse_constant=_reject_constant)
+            body = json.loads(
+                await request.body(),
+                parse_constant=_reject_constant,
+                parse_float=_parse_finite_float,
+            )
         except Exception:
             error_response = JsonRpcResponse.failure(
                 None,
