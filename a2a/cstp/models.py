@@ -1,8 +1,17 @@
 """CSTP request/response models for JSON-RPC methods."""
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+# Upper bounds on caller-supplied free text. Recording runs regex bridge
+# extraction synchronously on the (single-worker) event loop, so an unbounded
+# field let one request stall every other caller. MAX_TEXT_CHARS applies to the
+# decision / action description, the pattern, each reason's text, and each
+# recorded thought and query (which the deliberation tracker holds in memory).
+MAX_TEXT_CHARS = 10_000
+MAX_CONTEXT_CHARS = 50_000
 
 
 @dataclass(slots=True)
@@ -85,6 +94,9 @@ class QueryDecisionsRequest:
         """Create request from JSON-RPC params."""
         query = params.get("query", "")
         # Allow empty query for listing all decisions
+        # The deliberation tracker keeps each query in memory.
+        if len(query) > MAX_TEXT_CHARS:
+            raise ValueError(f"query: must be at most {MAX_TEXT_CHARS} characters")
 
         limit = params.get("limit", params.get("top_k", 10))
         # Higher limit allowed for empty queries (list-all mode)
@@ -231,19 +243,65 @@ class ActionContext:
         description = data.get("description", "")
         if not description:
             raise ValueError("Missing required field: action.description")
+        if len(description) > MAX_TEXT_CHARS:
+            raise ValueError(
+                f"action.description: must be at most {MAX_TEXT_CHARS} characters"
+            )
 
         known_fields = {"description", "category", "stakes", "confidence", "context"}
         extra = {k: v for k, v in data.items() if k not in known_fields}
         context = data.get("context", {})
         context.update(extra)
 
+        # A non-numeric confidence made guardrail evaluation raise, and
+        # preAction allowed the action whenever evaluation failed. NaN or
+        # infinity passes threshold rules, and once auto-recorded it makes
+        # calibration and listing responses fail to serialize for every agent.
+        confidence = data.get("confidence")
+        if confidence is not None:
+            error = "action.confidence: must be a number between 0 and 1"
+            try:
+                confidence = float(confidence)
+            except (TypeError, ValueError):
+                raise ValueError(error) from None
+            if not 0.0 <= confidence <= 1.0:  # also false for NaN
+                raise ValueError(error)
+
         return cls(
             description=description,
             category=data.get("category"),
             stakes=data.get("stakes", "medium"),
-            confidence=data.get("confidence"),
+            confidence=confidence,
             context=context,
         )
+
+    def guardrail_context(
+        self, agent_id: str, tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Build the guardrail evaluation context for this action.
+
+        Free-form context goes in first so it cannot override the structured
+        fields, and `agent_id` is the authenticated caller. Otherwise a caller
+        could send context {"stakes": "low"} or {"agent_id": "someone-else"}
+        and pass block rules and agent-scoped circuit breakers.
+
+        Args:
+            agent_id: Authenticated caller.
+            tags: Tags the action will be recorded with; defaults to any tags
+                in the free-form context. Anything but a list counts as none,
+                since circuit-breaker scope matching iterates them.
+        """
+        if tags is None:
+            tags = self.context.get("tags")
+        return {
+            **self.context,
+            "description": self.description,
+            "category": self.category,
+            "stakes": self.stakes,
+            "confidence": self.confidence,
+            "tags": [str(t) for t in tags] if isinstance(tags, list) else [],
+            "agent_id": agent_id,
+        }
 
 
 @dataclass(slots=True)
@@ -772,8 +830,9 @@ class LinkDecisionsRequest:
             errors.append(
                 f"edgeType must be one of: {', '.join(sorted(_GRAPH_EDGE_TYPES))}"
             )
-        if self.weight <= 0:
-            errors.append("weight must be positive")
+        # float() accepts "inf"; a non-finite weight breaks every getGraph response.
+        if not math.isfinite(self.weight) or self.weight <= 0:
+            errors.append("weight must be a finite positive number")
         return errors
 
 
@@ -1219,6 +1278,8 @@ class RecordThoughtParams:
         text = params.get("text", "")
         if not text:
             raise ValueError("Missing required parameter: text")
+        if len(text) > MAX_TEXT_CHARS:
+            raise ValueError(f"text: must be at most {MAX_TEXT_CHARS} characters")
 
         return cls(
             text=text,

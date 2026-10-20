@@ -18,6 +18,14 @@ services:
       # on recreate. Co-locating it with the YAML files also lets the startup
       # YAML→SQLite auto-migration find them.
       - CSTP_DB_PATH=${CSTP_DB_PATH:-/app/decisions/decisions.db}
+      # The rest of the server's state has the same problem: graph edges are
+      # stored only in this JSONL file (SQLite holds none), circuit breakers
+      # default to /app/data, and the F055 evidence chain and bundles default to
+      # the user's home directory. None of those is mounted.
+      - GRAPH_DATA_PATH=${GRAPH_DATA_PATH:-/app/decisions/graph_edges.jsonl}
+      - CIRCUIT_BREAKER_DATA_PATH=${CIRCUIT_BREAKER_DATA_PATH:-/app/decisions/circuit_breakers.jsonl}
+      - PROVENANCE_DB=${PROVENANCE_DB:-/app/decisions/provenance.db}
+      - PROVENANCE_BUNDLE_DIR=${PROVENANCE_BUNDLE_DIR:-/app/decisions/bundles}
     volumes:
       - ./config:/app/config:ro
       - ./guardrails:/app/guardrails:ro

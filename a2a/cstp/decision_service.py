@@ -5,6 +5,7 @@ Creates decision YAML files and indexes them to ChromaDB.
 
 import json
 import logging
+import math
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from typing import Any
 import yaml
 
 from .embeddings.factory import get_embedding_provider
+from .models import MAX_CONTEXT_CHARS, MAX_TEXT_CHARS
 from .storage.factory import get_decision_store
 from .vectordb.factory import get_vector_store
 
@@ -22,6 +24,19 @@ from .vectordb.factory import get_vector_store
 DECISIONS_PATH = os.getenv("DECISIONS_PATH", "decisions")
 
 logger = logging.getLogger(__name__)
+
+
+def finite_float(value: Any, field_name: str) -> float:
+    """Coerce a caller-supplied number to float, rejecting NaN and infinity.
+
+    float() accepts "nan", "inf" and "1e999". A non-finite number stored on a
+    decision makes every later response that includes it fail to serialize,
+    for every agent.
+    """
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name}: must be a finite number")
+    return number
 
 
 def _restore_yaml(file_path: Any, original_bytes: bytes) -> str:
@@ -102,7 +117,7 @@ class Reason:
         return cls(
             type=data.get("type") or "analysis",
             text=data.get("text") or "",
-            strength=float(data.get("strength") or 0.8),
+            strength=finite_float(data.get("strength") or 0.8, "reasons[].strength"),
         )
 
 
@@ -226,7 +241,11 @@ class ReasoningStep:
             step=int(data.get("step") or 0),
             thought=data.get("thought") or "",
             output=data.get("output"),
-            confidence=float(data.get("confidence")) if data.get("confidence") is not None else None,
+            confidence=(
+                finite_float(data.get("confidence"), "trace[].confidence")
+                if data.get("confidence") is not None
+                else None
+            ),
             tags=data.get("tags") or [],
         )
 
@@ -453,7 +472,7 @@ class RelatedDecision:
         return cls(
             id=data.get("id") or "",
             summary=data.get("summary") or "",
-            distance=float(data.get("distance") or 0.0),
+            distance=finite_float(data.get("distance") or 0.0, "related_to[].distance"),
         )
 
 
@@ -521,7 +540,7 @@ class RecordDecisionRequest:
 
         return cls(
             decision=data.get("decision") or "",
-            confidence=float(data.get("confidence") or 0.5),
+            confidence=finite_float(data.get("confidence") or 0.5, "confidence"),
             category=data.get("category") or "process",
             stakes=data.get("stakes") or "medium",
             context=data.get("context"),
@@ -539,9 +558,28 @@ class RecordDecisionRequest:
             agent_id=agent_id,
         )
 
+    def length_errors(self) -> list[str]:
+        """Return errors for free-text fields over their caps (see models.py).
+
+        Split out from validate() for the pre_action auto-record path, which
+        must enforce the caps without newly rejecting categories or stakes it
+        has always accepted.
+        """
+        errors = []
+        if self.decision and len(self.decision) > MAX_TEXT_CHARS:
+            errors.append(f"decision: must be at most {MAX_TEXT_CHARS} characters")
+        if self.context and len(self.context) > MAX_CONTEXT_CHARS:
+            errors.append(f"context: must be at most {MAX_CONTEXT_CHARS} characters")
+        if self.pattern and len(self.pattern) > MAX_TEXT_CHARS:
+            errors.append(f"pattern: must be at most {MAX_TEXT_CHARS} characters")
+        for i, reason in enumerate(self.reasons):
+            if reason.text and len(reason.text) > MAX_TEXT_CHARS:
+                errors.append(f"reasons[{i}].text: must be at most {MAX_TEXT_CHARS} characters")
+        return errors
+
     def validate(self) -> list[str]:
         """Validate the request. Returns list of errors."""
-        errors = []
+        errors = self.length_errors()
 
         if not self.decision or not self.decision.strip():
             errors.append("decision: required field")
@@ -912,9 +950,6 @@ async def get_decision(request: GetDecisionRequest) -> GetDecisionResponse:
         parts = filename.rsplit("-decision-", 1)
         if len(parts) == 2:
             data["id"] = parts[1]
-
-        # Add file path for reference
-        data["_file"] = str(yaml_file)
 
         return GetDecisionResponse(found=True, decision=data)
 
@@ -1376,6 +1411,44 @@ async def reindex_decision(
     return await index_to_chromadb(decision_id, embedding_text, metadata)
 
 
+def _update_errors(updates: dict[str, Any]) -> list[str]:
+    """Check updated fields against the limits recording enforces.
+
+    A NaN or infinite confidence makes calibration and listing responses fail
+    to serialize for every agent, and over-long text stalls re-indexing.
+    """
+    errors: list[str] = []
+    if "confidence" in updates:
+        confidence = updates["confidence"]
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, int | float)
+            or not 0.0 <= confidence <= 1.0  # also false for NaN
+        ):
+            errors.append("confidence: must be a number between 0 and 1")
+    for key, limit in (
+        ("decision", MAX_TEXT_CHARS),
+        ("pattern", MAX_TEXT_CHARS),
+        ("context", MAX_CONTEXT_CHARS),
+    ):
+        value = updates.get(key)
+        if isinstance(value, str) and len(value) > limit:
+            errors.append(f"{key}: must be at most {limit} characters")
+    for i, reason in enumerate(updates.get("reasons") or []):
+        if not isinstance(reason, dict):
+            continue
+        if len(str(reason.get("text", ""))) > MAX_TEXT_CHARS:
+            errors.append(f"reasons[{i}].text: must be at most {MAX_TEXT_CHARS} characters")
+        # Reasons are stored as given, and SQLite's REAL column turns the
+        # string "1e999" into infinity.
+        if reason.get("strength") is not None:
+            try:
+                finite_float(reason["strength"], "strength")
+            except (TypeError, ValueError):
+                errors.append(f"reasons[{i}].strength: must be a finite number")
+    return errors
+
+
 async def update_decision(
     decision_id: str,
     updates: dict[str, Any],
@@ -1398,6 +1471,10 @@ async def update_decision(
         return {"success": False, "error": f"Decision {decision_id} not found"}
 
     file_path, data = result
+
+    errors = _update_errors(updates)
+    if errors:
+        return {"success": False, "error": f"Validation failed: {'; '.join(errors)}"}
 
     # Merge updates
     allowed_fields = {"decision", "confidence", "tags", "pattern", "context", "reasons", "bridge"}

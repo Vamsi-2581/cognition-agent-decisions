@@ -50,15 +50,33 @@ Authorization: Bearer <agent>:<token>
 
 The agent name is extracted from the token pair and included in audit trails.
 
+### Identity and Permissions
+
+The token's agent is the caller's identity on both `/cstp` and `/mcp`. An `agentId` /
+`agent_id` argument never changes it: it only labels a deliberation bucket inside the
+caller's own namespace, so subagents sharing one token stay apart and no other token can
+add thoughts to those buckets or consume them.
+
+- **Only your own decisions.** `updateDecision`, `reviewDecision`, `setPreserve`,
+  `linkEvidence`, and `recordThought` appending to a recorded decision require the decision
+  to have been recorded by the caller.
+- **Admin only.** `resetCircuit`, `reindex`, `attributeOutcomes`, `ingestEvidence` and
+  `exportEvidenceBundle` require an agent listed in `auth.admins` (`CSTP_ADMIN_AGENTS`; see
+  [Configuration](./configuration.md#admin-role)). Admins may also change any agent's
+  decisions.
+- **`debugTracker`** shows an agent only its own sessions; admins see every session.
+
+A denied call returns error `-32009`; an MCP tool returns `{"error": "permission_denied"}`.
+
 ### Error Codes
 
 | Code | Name | Description |
 |------|------|-------------|
-| -32700 | Parse Error | Malformed JSON |
+| -32700 | Parse Error | Malformed JSON, including the non-standard `NaN` / `Infinity` literals |
 | -32600 | Invalid Request | Missing required fields |
 | -32601 | Method Not Found | Unknown CSTP method |
 | -32602 | Invalid Params | Parameter validation failed |
-| -32603 | Internal Error | Unexpected server error |
+| -32603 | Internal Error | Unexpected server error. The message is `Internal error (ref <id>)`; the detail is in the server log under that reference |
 | -32002 | Rate Limited | Too many requests |
 | -32003 | Query Failed | Error during decision query |
 | -32004 | Guardrail Eval Failed | Error evaluating guardrails |
@@ -66,6 +84,7 @@ The agent name is extracted from the token pair and included in audit trails.
 | -32006 | Review Failed | Error reviewing decision |
 | -32007 | Decision Not Found | Decision ID not found |
 | -32008 | Attribution Failed | Error attributing outcomes |
+| -32009 | Permission Denied | The caller's agent may not perform this operation (see above) |
 
 ---
 
@@ -209,7 +228,7 @@ Check a proposed action against all active guardrails.
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `action` | object | ✅ | Action context |
-| `action.description` | string | ✅ | What the agent intends to do |
+| `action.description` | string | ✅ | What the agent intends to do (max 10,000 characters) |
 | `action.category` | string | ❌ | Decision category |
 | `action.stakes` | string | ❌ | Stakes level (default: `"medium"`) |
 | `action.confidence` | float | ❌ | Agent's confidence (0.0–1.0) |
@@ -307,11 +326,11 @@ Record a new decision with full metadata, reasoning trace, and optional guardrai
 
 | Param | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `decision` | string | ✅ | — | Decision text / title |
+| `decision` | string | ✅ | — | Decision text / title (max 10,000 characters) |
 | `confidence` | float | ✅ | — | Confidence level (0.0–1.0) |
 | `category` | string | ✅ | — | Category (e.g., `"architecture"`, `"trading"`) |
 | `stakes` | string | ❌ | `"medium"` | `"low"`, `"medium"`, `"high"`, `"critical"` |
-| `context` | string | ❌ | — | Free-text context |
+| `context` | string | ❌ | — | Free-text context (max 50,000 characters) |
 | `reasons` | array | ❌ | `[]` | List of reason objects |
 | `reasons[].type` | string | — | — | Reason type: `"technical"`, `"risk"`, `"constraint"`, etc. |
 | `reasons[].text` | string | — | — | Reason text |
@@ -388,7 +407,8 @@ Record a new decision with full metadata, reasoning trace, and optional guardrai
 
 ### `cstp.reviewDecision` — Record Outcome
 
-Record the actual outcome of a previously recorded decision.
+Record the actual outcome of a previously recorded decision. Only the agent that recorded
+it, or an admin, may review it.
 
 **Parameters:**
 
@@ -453,6 +473,7 @@ Retrieve full decision record including bridge definition and deliberation trace
 ### `cstp.updateDecision` - Update Existing Decision
 
 Update fields on an existing decision. Use after recording to finalize with actual outcomes.
+Only the agent that recorded it, or an admin, may update it.
 
 **Parameters:**
 
@@ -509,8 +530,8 @@ Record chain-of-thought reasoning. Pre-decision mode accumulates in the tracker;
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
-| `text` | string | ✅ | Reasoning text |
-| `decision_id` | string | ❌ | If set, appends to existing decision (post-decision mode) |
+| `text` | string | ✅ | Reasoning text, at most 10,000 characters |
+| `decision_id` | string | ❌ | If set, appends to existing decision (post-decision mode); the caller must have recorded it |
 
 **Pre-decision example (no decision_id):**
 
@@ -651,7 +672,8 @@ Compute confidence calibration metrics for reviewed decisions.
 
 ### `cstp.attributeOutcomes` — Automatic Outcome Attribution
 
-Automatically attribute outcomes to decisions based on PR stability (age).
+Automatically attribute outcomes to decisions based on PR stability (age). Admin only: it
+writes outcomes onto every matching decision, whichever agent recorded it.
 
 **Parameters:**
 
@@ -705,7 +727,7 @@ Compare recent calibration against historical baseline to detect degradation.
 
 ### `cstp.reindex` — Full Reindex
 
-Delete and rebuild the ChromaDB collection from YAML files.
+Delete and rebuild the ChromaDB collection from YAML files. Admin only.
 
 **Parameters:**
 
@@ -737,7 +759,9 @@ have no MCP tool equivalents.**
 
 Evidence is stored in its own SQLite WAL database, separate from the decision store, at the path
 given by `PROVENANCE_DB` (default `~/.cstp/provenance.db`). The path is server-configured and
-cannot be overridden per request.
+cannot be overridden per request. The same holds for the bundle output directory
+(`PROVENANCE_BUNDLE_DIR`, default `~/.cstp/bundles`) and the control-mapping rules, which always
+load from `a2a/cstp/provenance/mappings/`.
 
 ### The Two-Class Evidence Model
 
@@ -757,6 +781,10 @@ response, the JSON bundle, or the PDF — merging the two would weaken the stron
 
 Append third-party events to the hash chain. All ingested events receive
 `evidence_class: "observed"`; this is not overridable. A batch is ingested atomically.
+
+Admin only: control mappings treat observed events as coming from a system the decision's
+agent does not control, such as a human PR approval, so an agent must not be able to write
+them. Each payload is stamped with `ingested_by`, the agent that sent it.
 
 **Parameters:**
 
@@ -815,7 +843,8 @@ Append third-party events to the hash chain. All ingested events receive
 ### `cstp.linkEvidence` — Correlate a Decision to Observed Events
 
 Links an existing CSTP decision to observed event sequence numbers, creating one
-`cstp_decision_linked` record with `evidence_class: "attested"`.
+`cstp_decision_linked` record with `evidence_class: "attested"`. The decision must exist
+and have been recorded by the caller (admins may link any decision).
 
 **Parameters:**
 
@@ -898,12 +927,17 @@ requiring human review (`MV-3`, `MEASURE-2.5`) fail closed unless `actor_is_huma
 
 ### `cstp.exportEvidenceBundle` — Export the Auditor Bundle
 
+Admin only: it writes bundle files on the server and records the chain head that
+`cstp.verifyEvidenceChain` later checks against.
+
 **Parameters:**
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `format` | string | ❌ | `"json"` (default) or `"pdf"`. Validated before any output directory is created |
-| `output_dir` | string | ❌ | Destination directory |
+
+Bundles are written to the server's `PROVENANCE_BUNDLE_DIR`; the response's `json_path` /
+`pdf_path` say where. An `output_dir` or `mappings_dir` param is ignored.
 
 PDF export requires the optional `pdf` extra (`pip install -e ".[pdf]"`, included in `[all]`).
 Without `reportlab` installed, a `format: "pdf"` request raises. Bundle filenames include a UUID
@@ -1047,7 +1081,7 @@ Validate an intended action against safety guardrails and policies.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `description` | string | ✅ | — | Action you intend to take |
+| `description` | string | ✅ | — | Action you intend to take (max 10,000 characters) |
 | `category` | string | ❌ | — | Action category |
 | `stakes` | string | ❌ | `"medium"` | `"low"`, `"medium"`, `"high"`, `"critical"` |
 | `confidence` | float | ❌ | — | Your confidence (0.0–1.0) |
@@ -1066,11 +1100,11 @@ Record a decision to the immutable decision log manually. Use only when `pre_act
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `decision` | string | ✅ | — | What you decided (state the choice) |
+| `decision` | string | ✅ | — | What you decided (state the choice; max 10,000 characters) |
 | `confidence` | float | ✅ | — | Confidence level (0.0–1.0) |
 | `category` | string | ✅ | — | `"architecture"`, `"process"`, `"integration"`, `"tooling"`, `"security"` |
 | `stakes` | string | ❌ | `"medium"` | Stakes level |
-| `context` | string | ❌ | — | Situation context |
+| `context` | string | ❌ | — | Situation context (max 50,000 characters) |
 | `reasons` | array | ❌ | — | `[{"type": "analysis", "text": "..."}]` — types: authority, analogy, analysis, pattern, intuition |
 | `tags` | array | ❌ | — | Tags for categorization |
 | `project` | string | ❌ | — | Project in owner/repo format |
@@ -1179,7 +1213,7 @@ curl -X POST http://localhost:8100/cstp \
   -d '{"jsonrpc":"2.0","method":"cstp.debugTracker","params":{},"id":1}'
 ```
 
-Returns active sessions with composite tracker keys, input counts, thought text, source, and age in seconds. Useful for debugging multi-agent deliberation isolation.
+Returns active sessions with composite tracker keys, input counts, thought text, source, and age in seconds. Useful for debugging multi-agent deliberation isolation. Keys are namespaced by the token's agent (`emerson|agent:planner`); an agent sees only its own sessions, admins see all.
 
 ---
 
@@ -1196,7 +1230,8 @@ MCP tool errors are returned as `TextContent` with JSON:
 
 Error types:
 - `validation_error` — Invalid input (Pydantic validation failure)
-- `internal_error` — Unexpected server error
+- `permission_denied` — The token's agent may not perform this operation
+- `internal_error` — Unexpected server error; the message carries a reference to the server log
 
 ---
 

@@ -22,8 +22,14 @@ auth:
       token: "${CSTP_TOKEN_EMERSON}"
     - agent: "test"
       token: "test-token-for-development"
+  # Agents that may reset breakers, reindex, attribute outcomes, ingest and
+  # export evidence, see every deliberation session, and change other agents' decisions. The
+  # dashboard's token needs one of these names.
+  admins: []
 
 tracker:
   input_ttl_seconds: 300
   session_ttl_seconds: 1800
   consumed_history_size: 50
+  max_sessions_per_agent: 200
+  max_inputs_per_session: 100

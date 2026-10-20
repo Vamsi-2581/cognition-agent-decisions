@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from .cstp.models import MAX_CONTEXT_CHARS, MAX_TEXT_CHARS
+
 
 class QueryFiltersInput(BaseModel):
     """Optional filters for narrowing decision queries."""
@@ -57,6 +59,7 @@ class QueryDecisionsInput(BaseModel):
     query: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Natural language query to find similar past decisions",
     )
     limit: int = Field(
@@ -85,6 +88,7 @@ class CheckActionInput(BaseModel):
     description: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Description of the action you intend to take",
     )
     category: str | None = Field(
@@ -125,6 +129,7 @@ class ReasonInput(BaseModel):
     text: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Explanation of this reason",
     )
 
@@ -198,6 +203,7 @@ class LogDecisionInput(BaseModel):
     decision: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="What you decided — state the choice, not the question",
     )
     confidence: float = Field(
@@ -216,6 +222,7 @@ class LogDecisionInput(BaseModel):
     )
     context: str | None = Field(
         default=None,
+        max_length=MAX_CONTEXT_CHARS,
         description="Situation context — what led to this decision",
     )
     reasons: list[ReasonInput] | None = Field(
@@ -241,7 +248,8 @@ class LogDecisionInput(BaseModel):
     )
     agent_id: str | None = Field(
         default=None,
-        description="Agent identifier for multi-agent deliberation isolation. "
+        description="Label for multi-agent deliberation isolation within this "
+        "connection's token; the decision is recorded under the token's agent. "
         "Use when multiple agents share an MCP connection.",
     )
     decision_id: str | None = Field(
@@ -414,12 +422,13 @@ class RecordThoughtInput(BaseModel):
     text: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Reasoning/chain-of-thought text to record",
     )
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Agent identifier for multi-agent isolation. "
+            "Label for multi-agent isolation within this connection's token. "
             "Thoughts from different agent_ids are tracked separately. "
             "Required when multiple agents share an MCP connection."
         ),
@@ -446,6 +455,7 @@ class PreActionActionInput(BaseModel):
     description: str = Field(
         ...,
         min_length=1,
+        max_length=MAX_TEXT_CHARS,
         description="Description of the action you intend to take",
     )
     category: str | None = Field(
@@ -506,13 +516,15 @@ class PreActionInput(BaseModel):
     )
     pattern: str | None = Field(
         default=None,
+        max_length=MAX_TEXT_CHARS,
         description="Abstract pattern this action represents",
     )
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Agent identifier for multi-agent attribution. "
-            "Use when multiple agents share an MCP connection."
+            "Label for this agent's deliberation bucket when several agents "
+            "share one MCP connection. Decisions are always recorded under the "
+            "connection's token, not this label."
         ),
     )
 
@@ -557,8 +569,8 @@ class GetSessionContextInput(BaseModel):
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Agent identifier for multi-agent attribution. "
-            "Use when multiple agents share an MCP connection."
+            "Ignored: the result is built for the connection's token. "
+            "Accepted so existing clients still validate."
         ),
     )
 
@@ -598,8 +610,8 @@ class ReadyInput(BaseModel):
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Agent identifier for multi-agent attribution. "
-            "Use when multiple agents share an MCP connection."
+            "Ignored: the result is built for the connection's token. "
+            "Accepted so existing clients still validate."
         ),
     )
 

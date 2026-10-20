@@ -4,7 +4,9 @@ FastAPI-based server exposing CSTP methods via JSON-RPC 2.0
 and MCP tools via Streamable HTTP transport.
 """
 
+import json
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -15,7 +17,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .auth import AuthManager, set_auth_manager, verify_bearer_token
+from .auth import AuthManager, get_auth_manager, set_auth_manager, verify_bearer_token
 from .config import Config
 from .cstp import CstpDispatcher, get_dispatcher, register_methods
 from .models import AgentCapabilities, AgentCard, HealthResponse
@@ -57,6 +59,8 @@ async def lifespan(app: FastAPI):
         input_ttl=app.state.config.tracker.input_ttl_seconds,
         session_ttl=app.state.config.tracker.session_ttl_seconds,
         consumed_history_size=app.state.config.tracker.consumed_history_size,
+        max_sessions_per_agent=app.state.config.tracker.max_sessions_per_agent,
+        max_inputs_per_session=app.state.config.tracker.max_inputs_per_session,
     )
 
     # F050: Initialize decision store
@@ -198,6 +202,19 @@ def create_app(config: Config | None = None) -> FastAPI:
     return app
 
 
+def _reject_constant(name: str) -> float:
+    """`json.loads` hook that refuses the NaN / Infinity / -Infinity literals."""
+    raise ValueError(f"{name} is not valid JSON")
+
+
+def _parse_finite_float(text: str) -> float:
+    """`json.loads` hook that refuses number literals overflowing to infinity."""
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError(f"{text} is out of range")
+    return number
+
+
 def _mount_mcp(app: FastAPI) -> None:
     """Mount the MCP Streamable HTTP handler at /mcp.
 
@@ -206,12 +223,34 @@ def _mount_mcp(app: FastAPI) -> None:
     from starlette.types import Receive, Scope, Send
 
     async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
-        """ASGI handler that delegates to the MCP session manager."""
+        """ASGI handler that delegates to the MCP session manager.
+
+        A raw mount bypasses the `verify_bearer_token` dependency that guards
+        /cstp, so the same token check runs here, before anything reaches the
+        MCP tools. Without it anyone who could reach the port could read and
+        write decisions. The verified agent goes into the request state, where
+        the tools read their identity (see `mcp_server.get_caller_agent_id`).
+        """
+        from fastapi import HTTPException
+        from starlette.requests import HTTPConnection
+        from starlette.responses import JSONResponse as StarletteJSON
+
+        connection = HTTPConnection(scope)
+        try:
+            connection.state.agent_id = get_auth_manager().verify_token(
+                connection.headers.get("authorization", "")
+            )
+        except HTTPException as exc:
+            await StarletteJSON(
+                {"error": exc.detail},
+                status_code=exc.status_code,
+                headers=exc.headers,
+            )(scope, receive, send)
+            return
+
         session_manager = getattr(app.state, "mcp_session_manager", None)
         if session_manager is None:
             # MCP not available — return 503
-            from starlette.responses import JSONResponse as StarletteJSON
-
             response = StarletteJSON(
                 {"error": "MCP transport not available"},
                 status_code=503,
@@ -219,22 +258,7 @@ def _mount_mcp(app: FastAPI) -> None:
             await response(scope, receive, send)
             return
 
-        # F023 Phase 2: Set MCP tracker key from session ID header
-        from .mcp_server import _mcp_tracker_key
-
-        session_id = None
-        for header_name, header_value in scope.get("headers", []):
-            if header_name.lower() == b"mcp-session-id":
-                session_id = header_value.decode("utf-8", errors="replace")
-                break
-
-        token = _mcp_tracker_key.set(
-            f"mcp:{session_id}" if session_id else "mcp:default"
-        )
-        try:
-            await session_manager.handle_request(scope, receive, send)
-        finally:
-            _mcp_tracker_key.reset(token)
+        await session_manager.handle_request(scope, receive, send)
 
     # Mount as raw ASGI app (not a FastAPI route — MCP handles its own dispatch)
     app.mount("/mcp", handle_mcp)
@@ -288,9 +312,16 @@ def _register_routes(app: FastAPI) -> None:
         Returns:
             JSON-RPC response.
         """
-        # Parse request body
+        # Parse request body. NaN and Infinity are not JSON, but json.loads
+        # accepts them, and a literal like 1e999 overflows to infinity; stored
+        # on a decision or graph edge, such a value makes every later response
+        # that includes it fail to serialize, for every agent.
         try:
-            body = await request.json()
+            body = json.loads(
+                await request.body(),
+                parse_constant=_reject_constant,
+                parse_float=_parse_finite_float,
+            )
         except Exception:
             error_response = JsonRpcResponse.failure(
                 None,

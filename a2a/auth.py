@@ -63,6 +63,17 @@ class AuthManager:
 
         return agent_id
 
+    def is_admin(self, agent_id: str) -> bool:
+        """Return whether an authenticated agent has the admin role.
+
+        Args:
+            agent_id: Agent ID returned by `verify_token`.
+
+        Returns:
+            True if the agent is listed in `auth.admins` or auth is disabled.
+        """
+        return self._config.auth.is_admin(agent_id)
+
 
 # Global auth manager instance (set by server on startup)
 _auth_manager: AuthManager | None = None

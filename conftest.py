@@ -24,6 +24,23 @@ os.environ.setdefault("DASHBOARD_PASS", "test-pass")
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("CSTP_TOKEN", "test-token")
 
+from a2a.cstp.embeddings import EmbeddingProvider  # noqa: E402
+
+
+class OfflineEmbeddings(EmbeddingProvider):
+    """Fixed vectors, so no test reaches the Gemini API."""
+
+    async def embed(self, text: str) -> list[float]:
+        return [0.1] * 768
+
+    @property
+    def dimensions(self) -> int:
+        return 768
+
+    @property
+    def model_name(self) -> str:
+        return "offline-test"
+
 
 @pytest.fixture(autouse=True)
 def _isolated_decision_store():
@@ -46,3 +63,46 @@ def _isolated_decision_store():
     set_decision_store(MemoryDecisionStore())
     yield
     set_decision_store(None)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_index_backends():
+    """Give every test in-memory graph and vector stores and offline embeddings.
+
+    The defaults reach outside the test: `NetworkXGraphStore` appends edges to
+    the CWD-relative `data/graph_edges.jsonl`, `ChromaDBStore` talks to
+    localhost:8000, and `GeminiEmbeddings` calls the Gemini API with whatever key
+    the environment holds. Any test that reached `recordDecision`,
+    `reviewDecision` or `pre_action` without injecting its own backends hit all
+    three. CLAUDE.md requires tests to run offline.
+
+    As above, a test's own `set_*()` call wins for the rest of that test.
+    """
+    from a2a.cstp.embeddings.factory import set_embedding_provider
+    from a2a.cstp.graphdb.factory import set_graph_store
+    from a2a.cstp.graphdb.memory import MemoryGraphStore
+    from a2a.cstp.vectordb.factory import set_vector_store
+    from a2a.cstp.vectordb.memory import MemoryStore
+
+    set_graph_store(MemoryGraphStore())
+    set_vector_store(MemoryStore())
+    set_embedding_provider(OfflineEmbeddings())
+    yield
+    set_graph_store(None)
+    set_vector_store(None)
+    set_embedding_provider(None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_auth_manager():
+    """Undo any test's change to the global AuthManager.
+
+    The server lifespan and several tests install one, and the admin check in
+    `a2a.cstp.access` reads it, so a manager left behind with auth disabled
+    would make every later caller an admin.
+    """
+    from a2a import auth
+
+    previous = auth._auth_manager
+    yield
+    auth._auth_manager = previous

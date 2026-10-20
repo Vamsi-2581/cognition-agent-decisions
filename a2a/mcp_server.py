@@ -13,10 +13,10 @@ ASGI applications (see ``a2a/server.py``).
 """
 
 import asyncio
-import contextvars
 import json
 import logging
 import sys
+import uuid
 from typing import Any
 
 from mcp.server import Server
@@ -26,6 +26,7 @@ from mcp.types import (
     Tool,
 )
 
+from .cstp.access import PermissionDeniedError
 from .mcp_schemas import (
     CheckActionInput,
     GetCircuitStateInput,
@@ -87,20 +88,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cstp-mcp")
 
-# F023 Phase 2: ContextVar for MCP session tracking key
-# Set by the HTTP handler or defaults to "mcp:default"
-_mcp_tracker_key: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "_mcp_tracker_key", default="mcp:default"
-)
+# Server instance — importable for mounting in ASGI apps (see a2a/server.py)
+mcp_app = Server("cstp-decisions")
+
+# Agent for tool calls that carry no HTTP request: the stdio transport, which
+# runs as the local user without a bearer token, and direct in-process calls.
+LOCAL_AGENT_ID = "mcp-client"
+
+# Set by run_stdio. Without it, a tool call inside an MCP session must arrive
+# on an authenticated HTTP request.
+_stdio_transport = False
+
+
+def get_caller_agent_id() -> str:
+    """Return the authenticated agent for the current tool call.
+
+    Identity comes from the transport, never from tool arguments: over HTTP
+    it is the agent `handle_mcp` resolved from the bearer token. A tool's
+    `agent_id` argument only labels deliberation buckets within that agent.
+
+    Raises:
+        PermissionDeniedError: A session tool call arrived without an
+            authenticated HTTP request outside the stdio transport.
+    """
+    try:
+        request = mcp_app.request_context.request
+    except LookupError:
+        return LOCAL_AGENT_ID  # called directly, not through an MCP session
+    if request is None:
+        if _stdio_transport:
+            return LOCAL_AGENT_ID
+        raise PermissionDeniedError("MCP request is not authenticated")
+    agent_id = getattr(request.state, "agent_id", None)
+    if not agent_id:
+        raise PermissionDeniedError("MCP request is not authenticated")
+    return str(agent_id)
 
 
 def get_mcp_tracker_key() -> str:
-    """Get the current MCP tracker key for deliberation tracking."""
-    return _mcp_tracker_key.get()
+    """Get the deliberation tracker key for the current MCP session.
 
+    Read per call from the request: tool calls run in the session's
+    long-lived task, so state set per HTTP request does not reach them.
+    """
+    from .cstp.deliberation_tracker import principal_key
 
-# Server instance — importable for mounting in ASGI apps (see a2a/server.py)
-mcp_app = Server("cstp-decisions")
+    agent_id = get_caller_agent_id()
+    try:
+        request = mcp_app.request_context.request
+    except LookupError:
+        request = None
+    session_id = request.headers.get("mcp-session-id") if request is not None else None
+    return principal_key(agent_id, f"mcp:{session_id or 'default'}")
 
 
 def _build_query_params(args: QueryDecisionsInput) -> dict[str, Any]:
@@ -408,16 +447,26 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 text=json.dumps({"error": "validation_error", "message": str(e)}),
             )
         ]
-    except Exception as e:
-        # Catches pydantic.ValidationError and any other unexpected errors
-        error_type = "validation_error" if "ValidationError" in type(e).__name__ else "internal_error"
-        logger.error("Tool %s failed (%s): %s", name, type(e).__name__, e, exc_info=True)
+    except PermissionDeniedError as e:
+        logger.warning("Permission denied in tool %s: %s", name, e)
         return [
             TextContent(
                 type="text",
-                text=json.dumps({"error": error_type, "message": str(e)}),
+                text=json.dumps({"error": "permission_denied", "message": str(e)}),
             )
         ]
+    except Exception as e:
+        # Catches pydantic.ValidationError and any other unexpected errors
+        if "ValidationError" in type(e).__name__:
+            logger.warning("Validation error in tool %s: %s", name, e)
+            payload = {"error": "validation_error", "message": str(e)}
+        else:
+            # Unexpected errors can carry paths, SQL or backend detail, so the
+            # caller gets a reference to the server log instead of the message.
+            ref = uuid.uuid4().hex[:12]
+            logger.error("Tool %s failed (ref %s)", name, ref, exc_info=True)
+            payload = {"error": "internal_error", "message": f"Internal error (ref {ref})"}
+        return [TextContent(type="text", text=json.dumps(payload))]
 
 
 async def _handle_query_decisions(arguments: dict[str, Any]) -> list[TextContent]:
@@ -495,7 +544,7 @@ async def _handle_query_decisions(arguments: dict[str, Any]) -> list[TextContent
         total=len(decisions),
         query=request.query,
         query_time_ms=query_time_ms,
-        agent="mcp-client",
+        agent=get_caller_agent_id(),
         retrieval_mode=request.retrieval_mode,
         scores={},
     )
@@ -532,24 +581,13 @@ async def _handle_check_action(arguments: dict[str, Any]) -> list[TextContent]:
     params = _build_guardrails_params(args)
     request = CheckGuardrailsRequest.from_params(params)
 
-    # Build evaluation context (matches dispatcher pattern)
-    context: dict[str, Any] = {
-        "category": request.action.category,
-        "stakes": request.action.stakes,
-        "confidence": request.action.confidence,
-    }
-    if request.action.context:
-        # Merge additional context but don't overwrite explicit params
-        for k, v in request.action.context.items():
-            if k not in context:
-                context[k] = v
-
-    # Evaluate guardrails
+    # Evaluate guardrails (same context as the dispatcher builds)
+    context = request.action.guardrail_context(get_caller_agent_id())
     eval_result = await evaluate_guardrails(context)
 
     # Log the check
     log_guardrail_check(
-        requesting_agent="mcp-client",
+        requesting_agent=get_caller_agent_id(),
         action_description=request.action.description,
         allowed=eval_result.allowed,
         violations=eval_result.violations,
@@ -667,16 +705,19 @@ async def _handle_log_decision(arguments: dict[str, Any]) -> list[TextContent]:
             bridge_data["prevention"] = args.bridge.prevention
         params["bridge"] = bridge_data
 
-    # Create request and record
-    request = RecordDecisionRequest.from_dict(params, agent_id=args.agent_id or "mcp-client")
+    # Create request and record. The decision belongs to the authenticated
+    # caller; args.agent_id only labels its deliberation bucket.
+    agent_id = get_caller_agent_id()
+    request = RecordDecisionRequest.from_dict(params, agent_id=agent_id)
 
     # Build composite tracker key for multi-agent isolation
-    from .cstp.deliberation_tracker import build_tracker_key
+    from .cstp.deliberation_tracker import build_tracker_key, principal_key
 
     tracker_key = build_tracker_key(
         agent_id=args.agent_id,
         decision_id=args.decision_id,
-        transport_key="mcp-session",
+        transport_key=principal_key(agent_id, "mcp-session"),
+        principal=agent_id,
     )
 
     # F025: Extract related decisions BEFORE consuming tracker
@@ -772,7 +813,11 @@ async def _handle_review_outcome(arguments: dict[str, Any]) -> list[TextContent]
         params["notes"] = args.notes
 
     # Create request and review
-    request = ReviewDecisionRequest.from_dict(params, reviewer_id="mcp-client")
+    from .cstp.access import require_decision_owner
+
+    agent_id = get_caller_agent_id()
+    await require_decision_owner(args.id, agent_id)
+    request = ReviewDecisionRequest.from_dict(params, reviewer_id=agent_id)
     response = await review_decision(request)
 
     # Format response
@@ -912,6 +957,9 @@ async def _handle_update_decision_mcp(arguments: dict[str, Any]) -> list[TextCon
     if not updates:
         return [TextContent(type="text", text=json.dumps({"error": "No fields to update"}))]
 
+    from .cstp.access import require_decision_owner
+
+    await require_decision_owner(input_data.id, get_caller_agent_id())
     result = await update_decision(input_data.id, updates)
 
     return [TextContent(type="text", text=json.dumps(result))]
@@ -922,13 +970,16 @@ async def _handle_record_thought_mcp(arguments: dict[str, Any]) -> list[TextCont
     from .cstp.deliberation_tracker import track_reasoning
 
     input_data = RecordThoughtInput(**arguments)
+    agent_id = get_caller_agent_id()
 
     if input_data.decision_id:
         # Try post-decision append first (decision already exists)
+        from .cstp.access import require_decision_owner
         from .cstp.decision_service import append_thought, find_decision
 
         found = await find_decision(input_data.decision_id)
         if found:
+            await require_decision_owner(input_data.decision_id, agent_id)
             result = await append_thought(input_data.decision_id, input_data.text)
             if not result.get("success"):
                 return [TextContent(type="text", text=json.dumps({"error": result.get("error", "Unknown error")}))]
@@ -942,12 +993,13 @@ async def _handle_record_thought_mcp(arguments: dict[str, Any]) -> list[TextCont
         # with decision_id scoping (decision will be recorded later)
 
     # Pre-decision: accumulate in tracker with composite key
-    from .cstp.deliberation_tracker import build_tracker_key
+    from .cstp.deliberation_tracker import build_tracker_key, principal_key
 
     tracker_key = build_tracker_key(
         agent_id=input_data.agent_id,
         decision_id=input_data.decision_id,
-        transport_key="mcp-session",
+        transport_key=principal_key(agent_id, "mcp-session"),
+        principal=agent_id,
     )
     track_reasoning(tracker_key, input_data.text)
     return [TextContent(type="text", text=json.dumps({
@@ -992,12 +1044,14 @@ async def _handle_pre_action_mcp(arguments: dict[str, Any]) -> list[TextContent]
     if args.pattern:
         params["pattern"] = args.pattern
 
+    from .cstp.deliberation_tracker import principal_key
+
     request = PreActionRequest.from_params(params)
-    mcp_agent = args.agent_id or "mcp-client"
+    agent_id = get_caller_agent_id()
     response = await pre_action(
         request,
-        agent_id=mcp_agent,
-        tracker_key=f"mcp:{mcp_agent}",
+        agent_id=agent_id,
+        tracker_key=principal_key(agent_id, f"mcp:{args.agent_id or 'mcp-client'}"),
     )
 
     return [
@@ -1030,7 +1084,7 @@ async def _handle_get_session_context_mcp(
         params["include"] = args.include
 
     request = SessionContextRequest.from_params(params)
-    response = await get_session_context(request, agent_id=args.agent_id or "mcp-client")
+    response = await get_session_context(request, agent_id=get_caller_agent_id())
 
     return [
         TextContent(
@@ -1057,7 +1111,7 @@ async def _handle_ready_mcp(arguments: dict[str, Any]) -> list[TextContent]:
         params["category"] = args.category
 
     request = ReadyRequest.from_params(params)
-    response = await get_ready_actions(request, agent_id=args.agent_id or "mcp-client")
+    response = await get_ready_actions(request, agent_id=get_caller_agent_id())
 
     return [
         TextContent(
@@ -1079,7 +1133,7 @@ async def _handle_link_decisions_mcp(arguments: dict[str, Any]) -> list[TextCont
         edge_type=args.edge_type,
         weight=args.weight,
         context=args.context,
-        agent_id="mcp-client",
+        agent_id=get_caller_agent_id(),
     )
     return [
         TextContent(
@@ -1173,6 +1227,10 @@ async def run_stdio() -> None:
     None`. Since store writes are authoritative, that failure would propagate to
     the caller — and record_decision would delete the YAML file it had just
     written, on the assumption the write never landed.
+
+    The graph store needs the same lifespan setup: without it the persisted
+    edges are never loaded, and get_graph/get_neighbors report saved decisions
+    as "Node not found".
     """
     logger.info("Starting CSTP MCP server (stdio transport)")
 
@@ -1183,6 +1241,33 @@ async def run_stdio() -> None:
     mark_initialized()
     logger.info("Decision store initialized (backend=%s)", type(store).__name__)
 
+    from .cstp.graph_service import initialize_graph_from_decisions
+    from .cstp.graphdb.factory import (
+        get_graph_store,
+        mark_initialized as mark_graph_initialized,
+        set_graph_store,
+    )
+
+    try:
+        graph_store = get_graph_store()
+        await graph_store.initialize()
+        await initialize_graph_from_decisions()
+        mark_graph_initialized()
+        logger.info("Graph store initialized")
+    except Exception:
+        logger.warning("Graph store initialization failed", exc_info=True)
+        set_graph_store(None)
+
+    # Tool calls on this transport carry no HTTP request; they act as the
+    # local user (LOCAL_AGENT_ID) instead of being refused as unauthenticated.
+    # There are no tokens here, as with auth disabled, so that user is an admin
+    # and can still change decisions recorded under older or other names.
+    from .auth import AuthManager, set_auth_manager
+    from .config import AuthConfig, Config
+
+    set_auth_manager(AuthManager(Config(auth=AuthConfig(enabled=False))))
+    global _stdio_transport
+    _stdio_transport = True
     try:
         async with stdio_server() as (read_stream, write_stream):
             await mcp_app.run(
@@ -1191,6 +1276,7 @@ async def run_stdio() -> None:
                 mcp_app.create_initialization_options(),
             )
     finally:
+        _stdio_transport = False
         await store.close()
 
 

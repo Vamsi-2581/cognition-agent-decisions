@@ -59,7 +59,10 @@
 
         {% if b.state == 'open' %}
         <div class="breaker-card-footer">
-            <button class="btn btn--danger btn--sm" @click="$store.breakers.openReset({{ b.scope|tojson }})">
+            {# tojson's double quotes ended the double-quoted attribute, leaving the
+               handler as `openReset(`; pass the scope as data instead. #}
+            <button class="btn btn--danger btn--sm" data-scope="{{ b.scope }}"
+                    @click="$store.breakers.openReset($el.dataset.scope)">
                 Reset
             </button>
         </div>

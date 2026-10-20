@@ -1,5 +1,6 @@
 """Tests for F002: cstp.queryDecisions implementation."""
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -333,4 +334,6 @@ class TestQueryDecisionsEndpoint:
 
         assert "error" in data
         assert data["error"]["code"] == -32603  # Internal error
-        assert "ChromaDB unavailable" in data["error"]["message"]
+        # Backend detail stays in the server log; the caller gets a reference.
+        assert data["error"]["message"].startswith("Internal error (ref ")
+        assert "ChromaDB" not in json.dumps(data)

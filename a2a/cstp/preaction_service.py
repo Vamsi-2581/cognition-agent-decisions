@@ -57,14 +57,10 @@ async def pre_action(
 
     # --- Build inputs for concurrent calls ---
 
-    # Guardrail evaluation context
-    guardrail_context: dict[str, Any] = {
-        "category": action.category,
-        "stakes": action.stakes,
-        "confidence": action.confidence,
-    }
-    if action.context:
-        guardrail_context.update(action.context)
+    # Guardrail evaluation context: the tags and category the decision will be
+    # recorded with, so category and tag circuit breakers see what is stored.
+    guardrail_context = action.guardrail_context(agent_id, tags=request.tags)
+    guardrail_context["category"] = action.category or "process"
 
     # Calibration request scoped to this category
     cal_request = GetCalibrationRequest(category=action.category)
@@ -142,8 +138,11 @@ async def pre_action(
     guardrail_violations: list[GuardrailViolation] = []
 
     if isinstance(guardrail_result, Exception):
+        # Fail closed: a caller who could make evaluation raise would otherwise
+        # pass every block rule and open circuit breaker.
         logger.warning("Guardrail evaluation failed: %s", guardrail_result)
-        # Fail open: allow if guardrails error
+        allowed = False
+        block_reasons.append("Guardrails could not be evaluated, so the action is blocked")
     else:
         allowed = guardrail_result.allowed
         for v in guardrail_result.violations:
@@ -252,6 +251,13 @@ async def pre_action(
                 key=tracker_key,
                 deliberation=record_req.deliberation,
             )
+
+            # Enforce the text caps before bridge extraction, which runs regexes
+            # over the raw text; reasons and pattern arrive here unchecked from
+            # cstp.preAction.
+            errors = record_req.length_errors()
+            if errors:
+                raise ValueError(f"Validation failed: {'; '.join(errors)}")
 
             # F027 P2: Smart bridge extraction
             from .bridge_hook import maybe_smart_extract_bridge

@@ -3,8 +3,10 @@
 {% if sessions %}
 <div class="session-list">
     {% for session in sessions %}
-    <div class="session-card">
-        <div class="session-card-header" @click="$store.deliberation.toggle('{{ session.key|replace("'", "\\'") }}')">
+    {# The key comes from callers. Keep it in an HTML-escaped attribute and read it
+       back as data: interpolated into an Alpine expression it was executable. #}
+    <div class="session-card" data-key="{{ session.key }}">
+        <div class="session-card-header" @click="$store.deliberation.toggle($el.closest('[data-key]').dataset.key)">
             <div class="session-card-meta">
                 <span class="session-pulse session-pulse--{{ session.freshness }}"></span>
                 {% if session.parsed.agent_id %}
@@ -28,11 +30,11 @@
             </div>
             <div class="flex gap-3 items-center">
                 <span class="session-input-count">{{ session.input_count }} input{{ 's' if session.input_count != 1 }}</span>
-                <span class="session-expand-icon" :class="{ 'session-expand-icon--open': $store.deliberation.isOpen('{{ session.key|replace("'", "\\'") }}') }">&#9654;</span>
+                <span class="session-expand-icon" :class="{ 'session-expand-icon--open': $store.deliberation.isOpen($el.closest('[data-key]').dataset.key) }">&#9654;</span>
             </div>
         </div>
 
-        <div class="session-card-body" x-show="$store.deliberation.isOpen('{{ session.key|replace("'", "\\'") }}')" x-cloak>
+        <div class="session-card-body" x-show="$store.deliberation.isOpen($el.closest('[data-key]').dataset.key)" x-cloak>
             {% for inp in session.inputs %}
             <div class="session-input">
                 <span class="badge badge--type-{{ inp.type }}">{{ inp.type }}</span>
@@ -55,8 +57,8 @@
 <h3 class="section-title mt-4">Recently Consumed</h3>
 <div class="session-list session-list--consumed">
     {% for item in consumed %}
-    <div class="session-card session-card--consumed">
-        <div class="session-card-header" @click="$store.deliberation.toggle('consumed:{{ item.key|replace("'", "\\'") }}')">
+    <div class="session-card session-card--consumed" data-key="consumed:{{ item.key }}">
+        <div class="session-card-header" @click="$store.deliberation.toggle($el.closest('[data-key]').dataset.key)">
             <div class="session-card-meta">
                 <span class="badge badge--{{ 'success' if item.status == 'consumed' else 'warning' }}">
                     {{ item.status }}
@@ -79,13 +81,13 @@
                 <span class="session-input-count">{{ item.input_count }} input{{ 's' if item.input_count != 1 }}</span>
                 <span class="session-input-age {{ item.age_class }}">{{ item.age_display }}</span>
                 <span class="session-expand-icon"
-                      :class="{ 'session-expand-icon--open': $store.deliberation.isOpen('consumed:{{ item.key|replace("'", "\\'") }}') }">
+                      :class="{ 'session-expand-icon--open': $store.deliberation.isOpen($el.closest('[data-key]').dataset.key) }">
                     &#9654;
                 </span>
             </div>
         </div>
         <div class="session-card-body"
-             x-show="$store.deliberation.isOpen('consumed:{{ item.key|replace("'", "\\'") }}')" x-cloak>
+             x-show="$store.deliberation.isOpen($el.closest('[data-key]').dataset.key)" x-cloak>
             {% for inp in item.inputs_summary %}
             <div class="session-input">
                 <span class="badge badge--type-{{ inp.type }}">{{ inp.type }}</span>

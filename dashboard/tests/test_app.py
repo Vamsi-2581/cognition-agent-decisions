@@ -1,5 +1,6 @@
 """Tests for Flask routes."""
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from unittest.mock import MagicMock
 
 from flask.testing import FlaskClient
@@ -575,3 +576,67 @@ def test_search_with_status_filter(
     )
 
     assert response.status_code == 200
+
+
+def _collect_attrs(html: str) -> list[tuple[str, str]]:
+    """Return every (attribute, unescaped value) pair in the document."""
+    found: list[tuple[str, str]] = []
+
+    class _Collector(HTMLParser):
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            found.extend((name, value or "") for name, value in attrs)
+
+    _Collector().feed(html)
+    return found
+
+
+def test_deliberation_keys_never_reach_alpine_expressions(
+    client: FlaskClient, auth_headers: dict[str, str], mock_cstp: MagicMock
+) -> None:
+    """Regression: stored XSS through a tracker key.
+
+    Keys embed the caller's agent_id. The template escaped quotes but not
+    backslashes before splicing the key into Alpine expressions, so an agent_id
+    ending in a backslash closed the string and the rest ran as JS for whoever
+    opened the page. Keys now travel as HTML-escaped data attributes.
+    """
+    evil = "agent:x\\');alert(document.domain);//"
+    mock_cstp.debug_tracker = MagicMock(return_value={
+        "sessions": [evil],
+        "sessionCount": 1,
+        "detail": {evil: {
+            "inputCount": 1,
+            "inputs": [{"type": "thought", "text": "hi", "ageSeconds": 5}],
+        }},
+        "consumed": [{"key": evil, "inputCount": 1, "status": "consumed", "consumedAt": 5}],
+    })
+
+    response = client.get("/deliberation/partial", headers=auth_headers)
+
+    assert response.status_code == 200
+    attrs = _collect_attrs(response.get_data(as_text=True))
+    alpine = [value for name, value in attrs if name.startswith(("@", ":", "x-"))]
+    assert alpine, "expected Alpine bindings in the partial"
+    assert not any("alert" in value for value in alpine)
+    data_keys = sorted(value for name, value in attrs if name == "data-key")
+    assert data_keys == sorted([evil, f"consumed:{evil}"])
+
+
+def test_breaker_reset_button_handler_is_intact(
+    client: FlaskClient, auth_headers: dict[str, str], mock_cstp: MagicMock
+) -> None:
+    """Regression: `openReset({{ b.scope|tojson }})` sat in a double-quoted
+    attribute, so the JSON's own quotes ended it and the handler parsed as
+    `$store.breakers.openReset(` - the Reset button did nothing."""
+    scope = "tag:O'Malley \"x\""
+    mock_cstp.list_breakers = MagicMock(return_value=[{
+        "scope": scope, "state": "open", "failure_count": 3, "failure_threshold": 3,
+        "window_ms": 60_000, "cooldown_ms": 60_000, "cooldown_remaining_ms": 1_000,
+    }])
+
+    response = client.get("/breakers/partial", headers=auth_headers)
+
+    assert response.status_code == 200
+    attrs = dict(_collect_attrs(response.get_data(as_text=True)))
+    assert attrs["@click"] == "$store.breakers.openReset($el.dataset.scope)"
+    assert attrs["data-scope"] == scope

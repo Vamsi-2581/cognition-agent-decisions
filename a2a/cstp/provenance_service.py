@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .access import require_decision_owner
 from .provenance.mapping import (
     MAPPINGS_DIR,
     MappingResult,
@@ -45,6 +46,15 @@ logger = logging.getLogger("cstp.provenance")
 DEFAULT_PROVENANCE_DB = os.environ.get(
     "PROVENANCE_DB",
     str(Path.home() / ".cstp" / "provenance.db"),
+)
+
+# Like the DB path, the bundle directory and the control-mapping rules are server
+# configuration. Taken from the request, a caller could make the server create
+# and write files in any directory it can reach, or point the rules engine at an
+# empty directory and get a bundle that maps nothing yet reads as clean.
+DEFAULT_BUNDLE_DIR = os.environ.get(
+    "PROVENANCE_BUNDLE_DIR",
+    str(Path.home() / ".cstp" / "bundles"),
 )
 
 
@@ -80,7 +90,9 @@ async def ingest_evidence(params: dict[str, Any], agent_id: str) -> dict[str, An
         source   — default source label if not specified per-event (default: "external")
 
     All ingested events receive evidence_class='observed'. The caller cannot override
-    this — observed events must come from external systems only.
+    this — observed events must come from external systems only. Each payload is
+    stamped with `ingested_by`, the authenticated agent that sent it, so a forged
+    event stays attributable.
 
     The entire batch is validated before any event is committed. If any event is
     invalid, no events are appended (atomic batch semantics).
@@ -117,6 +129,7 @@ async def ingest_evidence(params: dict[str, Any], agent_id: str) -> dict[str, An
 
         ts = ev.get("ts")
         source = ev.get("source") or default_source
+        payload = {**payload, "ingested_by": agent_id}
         validated.append((source, event_type, EVIDENCE_CLASS_OBSERVED, payload, ts))
 
     # Append atomically in one transaction (finding 11)
@@ -143,7 +156,8 @@ async def link_evidence(params: dict[str, Any], agent_id: str) -> dict[str, Any]
     decision store, not a hash chain.
 
     Params:
-        decision_id  — CSTP decision ID to correlate
+        decision_id  — CSTP decision ID to correlate; must exist and have been
+                       recorded by the caller (admins may link any decision)
         event_seqs   — list of observed event sequence numbers being linked
         stakes       — stakes level from the CSTP decision (optional, for mapping)
         has_outcome  — whether the decision has a recorded outcome (optional)
@@ -159,6 +173,7 @@ async def link_evidence(params: dict[str, Any], agent_id: str) -> dict[str, Any]
     decision_id = params.get("decision_id")
     if not decision_id:
         raise ValueError("'decision_id' is required")
+    await require_decision_owner(decision_id, agent_id, must_exist=True)
 
     event_seqs = params.get("event_seqs", [])
     if not isinstance(event_seqs, list):
@@ -233,8 +248,8 @@ async def map_controls(params: dict[str, Any], agent_id: str) -> dict[str, Any]:
     There is no single blended coverage_pct.
     Controls satisfied only by attested evidence are flagged attested_only=True.
 
-    Params:
-        mappings_dir  — optional override for the YAML rules directory
+    Rules always come from the packaged MAPPINGS_DIR; a ``mappings_dir`` param is
+    ignored (see DEFAULT_BUNDLE_DIR).
 
     Returns:
         coverage.observed   — {total_events, mapped_events, unmapped_events, coverage_pct}
@@ -246,11 +261,8 @@ async def map_controls(params: dict[str, Any], agent_id: str) -> dict[str, Any]:
     db_path = _get_db_path(params)
     _ensure_db(db_path)
 
-    mappings_dir_override = params.get("mappings_dir")
-    mappings_dir = Path(mappings_dir_override) if mappings_dir_override else MAPPINGS_DIR
-
     events = get_events_from_db(db_path)
-    rules = load_rules(mappings_dir)
+    rules = load_rules(MAPPINGS_DIR)
     mr = apply_rules(events, rules)
 
     return _mapping_result_to_dict(mr)
@@ -275,8 +287,9 @@ async def export_evidence_bundle(params: dict[str, Any], agent_id: str) -> dict[
 
     Params:
         format        — "json" (default) or "pdf" or "both"
-        output_dir    — directory to write bundle files (default: ./bundles)
-        mappings_dir  — optional override for the YAML rules directory
+
+    Bundles are written to the server-configured DEFAULT_BUNDLE_DIR and rules come
+    from MAPPINGS_DIR; ``output_dir`` and ``mappings_dir`` params are ignored.
 
     Returns:
         json_path      — path to JSON bundle file (if format includes json)
@@ -296,15 +309,12 @@ async def export_evidence_bundle(params: dict[str, Any], agent_id: str) -> dict[
             f"Unsupported bundle format: {fmt!r}. Must be 'json', 'pdf', or 'both'."
         )
 
-    output_dir = Path(params.get("output_dir", "bundles"))
+    output_dir = Path(DEFAULT_BUNDLE_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    mappings_dir_override = params.get("mappings_dir")
-    mappings_dir = Path(mappings_dir_override) if mappings_dir_override else MAPPINGS_DIR
 
     # Run mapping engine
     events = get_events_from_db(db_path)
-    rules = load_rules(mappings_dir)
+    rules = load_rules(MAPPINGS_DIR)
     mr = apply_rules(events, rules)
 
     # Checkpoint state machine (findings 5+6):

@@ -79,7 +79,9 @@ AI Agents → POST /cstp (JSON-RPC 2.0, Bearer auth)
 
 Vector storage and embeddings are abstracted behind `VectorStore` and `EmbeddingProvider` ABCs (F048). Graph storage is abstracted behind `GraphStore` ABC (F045). Services access backends via factory singletons (`get_vector_store()`, `get_embedding_provider()`, `get_graph_store()`). Backend selection is driven by `VECTOR_BACKEND`, `EMBEDDING_PROVIDER`, and `GRAPH_BACKEND` env vars.
 
-F055 provenance evidence lives in its own SQLite WAL database at `PROVENANCE_DB` (default `~/.cstp/provenance.db`), deliberately separate from the decision store. The path is server-configured only — RPC callers cannot override it.
+F055 provenance evidence lives in its own SQLite WAL database at `PROVENANCE_DB` (default `~/.cstp/provenance.db`), deliberately separate from the decision store. The path is server-configured only — RPC callers cannot override it. The same goes for the bundle directory (`PROVENANCE_BUNDLE_DIR`, default `~/.cstp/bundles`) and the mapping rules directory.
+
+Identity is the bearer token's agent on both `/cstp` and `/mcp` (stdio acts as `mcp-client`, an admin); `agent_id` arguments only label deliberation buckets, and tracker keys are namespaced `{agent}|...`. Agents may change only decisions they recorded; agents in `auth.admins` (`CSTP_ADMIN_AGENTS`) may change any and run `resetCircuit`, `reindex`, `attributeOutcomes`, `ingestEvidence` and `exportEvidenceBundle`. Checks live in `a2a/cstp/access.py` and run in the transport handlers (dispatcher and `mcp_server`), so a new mutating method needs one there.
 
 **Key constraint**: `src/cognition_engines/` must never import from `a2a/`. Core uses dataclasses, the a2a layer uses Pydantic.
 

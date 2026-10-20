@@ -46,8 +46,11 @@ COPY src/ ./src/
 COPY config/ ./config/
 COPY pyproject.toml ./
 
-# Create non-root user for security
+# Create non-root user for security. /app/decisions is the docker-compose volume
+# mount point: creating it here means a fresh named volume copies its appuser
+# ownership instead of mounting root-owned and unwritable.
 RUN useradd --create-home --shell /bin/bash appuser && \
+    mkdir -p /app/decisions && \
     chown -R appuser:appuser /app
 USER appuser
 

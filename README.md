@@ -191,6 +191,11 @@ curl -X POST http://localhost:8100/cstp \
 
 The F055 provenance methods are JSON-RPC only — they have no MCP tool equivalents.
 
+Every call acts as the agent its bearer token maps to. An agent may change only the
+decisions it recorded; `resetCircuit`, `reindex`, `attributeOutcomes`, `ingestEvidence` and
+`exportEvidenceBundle` need an agent listed in `CSTP_ADMIN_AGENTS` (or `auth.admins`), and the
+dashboard's token must be one. See [Identity and Permissions](website/reference/api.md#identity-and-permissions).
+
 ### Auto-Linking
 
 When `recordDecision` is called with related decisions (from `pre_action` or explicit `related_to`), the graph is automatically updated with `relates_to` edges. No manual `linkDecisions` call needed for common relationships.
@@ -207,6 +212,7 @@ curl -X POST http://localhost:8100/cstp \
 ```
 
 Returns active tracker sessions with composite keys, input counts, thought text, and age.
+An agent sees only its own sessions; admins see all.
 
 ## Architecture
 
@@ -285,8 +291,9 @@ the caller passed under `action.context.*`. Full boolean logic, comparisons, `in
 `contains()` are available.
 
 Legacy key/value conditions are auto-converted to CEL at evaluation time, so existing guardrail
-files keep working unchanged — no migration needed. Evaluation **fails open**: a guardrail whose
-expression fails to compile or raises at runtime is skipped and logged, never treated as a block.
+files keep working unchanged — no migration needed. Evaluation **fails closed**: a guardrail whose
+expression fails to compile or raises at runtime applies (a block rule blocks) and is logged as
+"could not be evaluated". Guard optional `action.context.*` fields with `has()`.
 
 See the [guardrails authoring guide](https://cognition-engines.ai/reference/guardrails-authoring) for
 the full field reference.
@@ -324,6 +331,7 @@ Evidence lives in its own SQLite WAL database, separate from the decision store:
 
 ```bash
 PROVENANCE_DB=~/.cstp/provenance.db   # default
+PROVENANCE_BUNDLE_DIR=~/.cstp/bundles # default; where exportEvidenceBundle writes
 ```
 
 PDF bundles need the optional `pdf` extra (`pip install -e ".[pdf]"`, included in `[all]`). JSON

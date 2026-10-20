@@ -38,3 +38,7 @@ uv.lock
 *.lock
 demo/seed-data/decisions.db
 demo/seed-data/graph_edges.jsonl
+# Runtime state the server and tests write relative to the repo root
+/data/
+/decisions/
+/.secrets/

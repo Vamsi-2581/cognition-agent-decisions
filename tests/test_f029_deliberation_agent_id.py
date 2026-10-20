@@ -112,15 +112,15 @@ class TestDispatcherBuildTrackerKey:
 
     def test_with_agent_id(self) -> None:
         key = dispatcher_build_key("transport-auth", agent_id="planner-01")
-        assert key == "agent:planner-01"
+        assert key == "transport-auth|agent:planner-01"
 
     def test_with_decision_id(self) -> None:
         key = dispatcher_build_key("transport-auth", decision_id="d1")
-        assert key == "decision:d1"
+        assert key == "transport-auth|decision:d1"
 
     def test_with_both(self) -> None:
         key = dispatcher_build_key("transport-auth", agent_id="a1", decision_id="d1")
-        assert key == "agent:a1:decision:d1"
+        assert key == "transport-auth|agent:a1:decision:d1"
 
     def test_fallback_to_transport(self) -> None:
         key = dispatcher_build_key("transport-auth")
@@ -303,11 +303,11 @@ class TestAgentIdOnly:
         assert response.error is None
         assert response.result["success"] is True
         assert response.result["mode"] == "pre-decision"
-        assert response.result["tracker_key"] == "agent:planner-01"
+        assert response.result["tracker_key"] == "rpc-auth-id|agent:planner-01"
 
         # Verify thought was tracked under agent key
         tracker = get_tracker()
-        inputs = tracker.get_inputs("agent:planner-01")
+        inputs = tracker.get_inputs("rpc-auth-id|agent:planner-01")
         assert len(inputs) == 1
 
     @pytest.mark.asyncio
@@ -321,7 +321,7 @@ class TestAgentIdOnly:
         )
         response = await dispatcher.dispatch(request, agent_id="auth-id")
         assert response.error is None
-        assert response.result["tracker_key"] == "agent:architect-02"
+        assert response.result["tracker_key"] == "auth-id|agent:architect-02"
 
 
 # ===========================================================================
@@ -457,10 +457,10 @@ class TestMultiAgentIsolation:
             assert resp.error is None
 
         tracker = get_tracker()
-        assert len(tracker.get_inputs("agent:agent-A")) == 1
-        assert len(tracker.get_inputs("agent:agent-B")) == 1
-        assert tracker.get_inputs("agent:agent-A")[0].text == "A thinking"
-        assert tracker.get_inputs("agent:agent-B")[0].text == "B thinking"
+        assert len(tracker.get_inputs("shared-auth|agent:agent-A")) == 1
+        assert len(tracker.get_inputs("shared-auth|agent:agent-B")) == 1
+        assert tracker.get_inputs("shared-auth|agent:agent-A")[0].text == "A thinking"
+        assert tracker.get_inputs("shared-auth|agent:agent-B")[0].text == "B thinking"
 
 
 # ===========================================================================
