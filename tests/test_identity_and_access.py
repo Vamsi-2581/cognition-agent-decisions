@@ -30,7 +30,12 @@ from a2a.models.jsonrpc import (
     JsonRpcRequest,
 )
 
-MCP_INSTALLED = importlib.util.find_spec("mcp") is not None
+try:
+    MCP_INSTALLED = importlib.util.find_spec("mcp") is not None
+except (ValueError, ModuleNotFoundError):
+    # Without the SDK, other test modules put a mock in sys.modules["mcp"],
+    # and find_spec raises for a module whose __spec__ is unset.
+    MCP_INSTALLED = False
 
 TOKENS = {"alice": "alice-token", "bob": "bob-token", "ops": "ops-token"}
 
