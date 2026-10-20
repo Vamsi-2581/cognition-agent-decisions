@@ -137,7 +137,7 @@ class TestCstpEndpointAuth:
         response = client.post(
             "/cstp",
             json={"jsonrpc": "2.0", "method": "cstp.queryDecisions"},
-            headers={"Authorization": "Bearer \xff"},
+            headers=[(b"Authorization", b"Bearer \xff")],
         )
         assert response.status_code == 401
 
@@ -359,7 +359,7 @@ class TestMcpEndpointAuth:
         client.app.state.mcp_session_manager = manager  # type: ignore[attr-defined]
 
         response = client.post(
-            "/mcp/", json=self._INITIALIZE, headers={"Authorization": "Bearer \xff"}
+            "/mcp/", json=self._INITIALIZE, headers=[(b"Authorization", b"Bearer \xff")]
         )
 
         assert response.status_code == 401
