@@ -132,6 +132,15 @@ class TestCstpEndpointAuth:
         )
         assert response.status_code == 401
 
+    def test_cstp_rejects_non_ascii_token(self, client: TestClient) -> None:
+        """CSTP endpoint should reject a non-ASCII bearer token with 401."""
+        response = client.post(
+            "/cstp",
+            json={"jsonrpc": "2.0", "method": "cstp.queryDecisions"},
+            headers={"Authorization": "Bearer \\xff"},
+        )
+        assert response.status_code == 401
+
     @patch("a2a.cstp.dispatcher.query_decisions")
     def test_cstp_accepts_valid_token(
         self, mock_query: AsyncMock, client: TestClient
@@ -340,6 +349,17 @@ class TestMcpEndpointAuth:
 
         response = client.post(
             "/mcp/", json=self._INITIALIZE, headers={"Authorization": "Bearer wrong"}
+        )
+
+        assert response.status_code == 401
+        assert manager.calls == 0
+
+    def test_non_ascii_token_is_rejected_before_mcp(self, client: TestClient) -> None:
+        manager = _RecordingSessionManager()
+        client.app.state.mcp_session_manager = manager  # type: ignore[attr-defined]
+
+        response = client.post(
+            "/mcp/", json=self._INITIALIZE, headers={"Authorization": "Bearer \\xff"}
         )
 
         assert response.status_code == 401
