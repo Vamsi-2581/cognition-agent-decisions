@@ -68,7 +68,7 @@ class AuthConfig:
             Agent ID if valid, None if invalid.
         """
         for auth_token in self.tokens:
-            if secrets.compare_digest(auth_token.token, token):
+            if secrets.compare_digest(auth_token.token.encode(), token.encode()):
                 return auth_token.agent
         return None
 
