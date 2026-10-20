@@ -270,6 +270,97 @@ class TestGuardrailContext:
         })
         assert response.error.code == INVALID_PARAMS
 
+    @pytest.mark.parametrize("confidence", ["nan", "inf", float("nan"), 5, -3])
+    @pytest.mark.parametrize("method", ["cstp.preAction", "cstp.checkGuardrails"])
+    async def test_out_of_range_confidence_is_rejected(
+        self, dispatcher, method: str, confidence: Any
+    ) -> None:
+        # NaN passed threshold rules, and once recorded it made calibration and
+        # listing fail to serialize for every agent.
+        response = await _call(dispatcher, "bob", method, {
+            "action": {**HIGH_STAKES_LOW_CONFIDENCE, "confidence": confidence},
+            "options": {"autoRecord": False},
+        })
+        assert response.error.code == INVALID_PARAMS
+
+    async def test_update_rejects_non_finite_confidence(self, dispatcher) -> None:
+        decision_id = await _record(dispatcher, "alice")
+
+        response = await _call(dispatcher, "alice", "cstp.updateDecision", {
+            "id": decision_id, "updates": {"confidence": float("nan")},
+        })
+
+        assert response.result["success"] is False
+        assert (await _stored(decision_id))["confidence"] == 0.8
+
+    async def test_pre_action_checks_what_auto_record_stores(
+        self, dispatcher, monkeypatch
+    ) -> None:
+        from a2a.cstp.guardrails_service import EvaluationResult
+
+        seen: list[dict[str, Any]] = []
+
+        async def capture(context: dict[str, Any]) -> EvaluationResult:
+            seen.append(context)
+            return EvaluationResult(allowed=True, violations=[], warnings=[], evaluated=0)
+
+        monkeypatch.setattr("a2a.cstp.preaction_service.evaluate_guardrails", capture)
+
+        await _call(dispatcher, "bob", "cstp.preAction", {
+            "action": {"description": "Change trading strategy"},
+            "tags": ["deploy"],
+            "options": {"autoRecord": False},
+        })
+
+        [context] = seen
+        assert context["tags"] == ["deploy"]
+        assert context["category"] == "process"
+        assert context["description"] == "Change trading strategy"
+
+    def test_non_list_context_tags_count_as_none(self) -> None:
+        from a2a.cstp.models import ActionContext
+
+        action = ActionContext.from_dict({"description": "Deploy", "context": {"tags": 5}})
+        assert action.guardrail_context("bob")["tags"] == []
+
+    async def test_breaker_check_error_blocks(self, dispatcher, monkeypatch) -> None:
+        from types import SimpleNamespace
+
+        async def check(context: dict[str, Any]) -> Any:
+            raise TypeError("argument of type 'int' is not iterable")
+
+        async def manager() -> Any:
+            return SimpleNamespace(is_initialized=True, check=check)
+
+        monkeypatch.setattr(
+            "a2a.cstp.circuit_breaker_service.get_circuit_breaker_manager", manager
+        )
+
+        response = await _call(dispatcher, "bob", "cstp.checkGuardrails", {
+            "action": {"description": "Pin pytest", "category": "process"},
+        })
+
+        assert response.result["allowed"] is False
+
+    async def test_record_guardrails_see_agent_and_tags(self, monkeypatch) -> None:
+        from a2a.cstp.decision_service import RecordDecisionRequest
+        from a2a.cstp.guardrails_service import EvaluationResult, evaluate_record_guardrails
+
+        seen: list[dict[str, Any]] = []
+
+        async def capture(context: dict[str, Any]) -> EvaluationResult:
+            seen.append(context)
+            return EvaluationResult(allowed=True, violations=[], warnings=[], evaluated=0)
+
+        monkeypatch.setattr("a2a.cstp.guardrails_service.evaluate_guardrails", capture)
+
+        await evaluate_record_guardrails(RecordDecisionRequest(
+            decision="Deploy", confidence=0.8, category="process",
+            tags=["deploy"], agent_id="alice",
+        ))
+
+        assert (seen[0]["agent_id"], seen[0]["tags"]) == ("alice", ["deploy"])
+
     async def test_pre_action_blocks_when_guardrails_cannot_be_evaluated(
         self, dispatcher, monkeypatch
     ) -> None:

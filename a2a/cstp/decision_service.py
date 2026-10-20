@@ -1393,6 +1393,35 @@ async def reindex_decision(
     return await index_to_chromadb(decision_id, embedding_text, metadata)
 
 
+def _update_errors(updates: dict[str, Any]) -> list[str]:
+    """Check updated fields against the limits recording enforces.
+
+    A NaN or infinite confidence makes calibration and listing responses fail
+    to serialize for every agent, and over-long text stalls re-indexing.
+    """
+    errors: list[str] = []
+    if "confidence" in updates:
+        confidence = updates["confidence"]
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, int | float)
+            or not 0.0 <= confidence <= 1.0  # also false for NaN
+        ):
+            errors.append("confidence: must be a number between 0 and 1")
+    for key, limit in (
+        ("decision", MAX_TEXT_CHARS),
+        ("pattern", MAX_TEXT_CHARS),
+        ("context", MAX_CONTEXT_CHARS),
+    ):
+        value = updates.get(key)
+        if isinstance(value, str) and len(value) > limit:
+            errors.append(f"{key}: must be at most {limit} characters")
+    for i, reason in enumerate(updates.get("reasons") or []):
+        if isinstance(reason, dict) and len(str(reason.get("text", ""))) > MAX_TEXT_CHARS:
+            errors.append(f"reasons[{i}].text: must be at most {MAX_TEXT_CHARS} characters")
+    return errors
+
+
 async def update_decision(
     decision_id: str,
     updates: dict[str, Any],
@@ -1415,6 +1444,10 @@ async def update_decision(
         return {"success": False, "error": f"Decision {decision_id} not found"}
 
     file_path, data = result
+
+    errors = _update_errors(updates)
+    if errors:
+        return {"success": False, "error": f"Validation failed: {'; '.join(errors)}"}
 
     # Merge updates
     allowed_fields = {"decision", "confidence", "tags", "pattern", "context", "reasons", "bridge"}

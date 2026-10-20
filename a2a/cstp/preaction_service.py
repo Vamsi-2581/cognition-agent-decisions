@@ -57,8 +57,10 @@ async def pre_action(
 
     # --- Build inputs for concurrent calls ---
 
-    # Guardrail evaluation context
-    guardrail_context = action.guardrail_context(agent_id)
+    # Guardrail evaluation context: the tags and category the decision will be
+    # recorded with, so category and tag circuit breakers see what is stored.
+    guardrail_context = action.guardrail_context(agent_id, tags=request.tags)
+    guardrail_context["category"] = action.category or "process"
 
     # Calibration request scoped to this category
     cal_request = GetCalibrationRequest(category=action.category)

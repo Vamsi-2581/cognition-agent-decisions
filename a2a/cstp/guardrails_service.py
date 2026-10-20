@@ -294,13 +294,15 @@ def _build_cel_activation(flat_ctx: dict[str, Any]) -> dict[str, Any]:
     action.setdefault("reason_count", 0)
     action.setdefault("pattern", "")
     action.setdefault("quality_score", 0.0)
-    # Record-phase fields: absent when checking an action before it is taken.
-    # A missing field is a CEL error, and errors now trigger the rule.
+    # Standard fields a caller may leave out (the record-phase ones are always
+    # absent before the action is taken). A missing field is a CEL error, and
+    # errors now trigger the rule.
     action.setdefault("phase", "")
     action.setdefault("deliberation_inputs_count", 0)
     action.setdefault("has_deliberation", False)
     action.setdefault("has_reasoning", False)
     action.setdefault("project", "")
+    action.setdefault("scope", "")
     action["has_tags"] = bool(action.get("tags"))
     action["has_pattern"] = bool(action.get("pattern"))
     action["context"] = extra
@@ -686,8 +688,28 @@ async def evaluate_guardrails(
         from .circuit_breaker_service import get_circuit_breaker_manager
 
         mgr = await get_circuit_breaker_manager()
-        if mgr.is_initialized:
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Circuit breaker manager unavailable", exc_info=True,
+        )
+        mgr = None
+    if mgr is not None and mgr.is_initialized:
+        try:
             cb_results = await mgr.check(context)
+        except Exception:
+            # Fail closed: the context holds caller input, and one exception
+            # skips every breaker, including one that is open.
+            logging.getLogger(__name__).warning(
+                "Circuit breaker evaluation failed", exc_info=True,
+            )
+            violations.append(GuardrailResult(
+                guardrail_id="circuit_breaker",
+                name="Circuit breakers",
+                message="Circuit breakers could not be evaluated, so the action is blocked",
+                severity="block",
+            ))
+            allowed = False
+        else:
             for cbr in cb_results:
                 if cbr.blocked:
                     violations.append(GuardrailResult(
@@ -697,10 +719,6 @@ async def evaluate_guardrails(
                         severity="block",
                     ))
                     allowed = False
-    except Exception:
-        logging.getLogger(__name__).debug(
-            "Circuit breaker evaluation failed", exc_info=True,
-        )
 
     return EvaluationResult(
         allowed=allowed,
@@ -739,6 +757,9 @@ async def evaluate_record_guardrails(
         "has_deliberation": delib_input_count > 0 or has_reasoning,
         "has_reasoning": has_reasoning,
         "phase": "record",
+        # agent: and tag: circuit breakers match on these.
+        "agent_id": getattr(request, "agent_id", None),
+        "tags": list(getattr(request, "tags", None) or []),
     }
 
     # F027 P3: Add quality score to context for guardrail evaluation

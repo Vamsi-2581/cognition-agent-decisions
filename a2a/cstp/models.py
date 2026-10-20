@@ -253,13 +253,18 @@ class ActionContext:
         context.update(extra)
 
         # A non-numeric confidence made guardrail evaluation raise, and
-        # preAction allowed the action whenever evaluation failed.
+        # preAction allowed the action whenever evaluation failed. NaN or
+        # infinity passes threshold rules, and once auto-recorded it makes
+        # calibration and listing responses fail to serialize for every agent.
         confidence = data.get("confidence")
         if confidence is not None:
+            error = "action.confidence: must be a number between 0 and 1"
             try:
                 confidence = float(confidence)
             except (TypeError, ValueError):
-                raise ValueError("action.confidence: must be a number") from None
+                raise ValueError(error) from None
+            if not 0.0 <= confidence <= 1.0:  # also false for NaN
+                raise ValueError(error)
 
         return cls(
             description=description,
@@ -269,19 +274,31 @@ class ActionContext:
             context=context,
         )
 
-    def guardrail_context(self, agent_id: str) -> dict[str, Any]:
+    def guardrail_context(
+        self, agent_id: str, tags: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Build the guardrail evaluation context for this action.
 
         Free-form context goes in first so it cannot override the structured
         fields, and `agent_id` is the authenticated caller. Otherwise a caller
         could send context {"stakes": "low"} or {"agent_id": "someone-else"}
         and pass block rules and agent-scoped circuit breakers.
+
+        Args:
+            agent_id: Authenticated caller.
+            tags: Tags the action will be recorded with; defaults to any tags
+                in the free-form context. Anything but a list counts as none,
+                since circuit-breaker scope matching iterates them.
         """
+        if tags is None:
+            tags = self.context.get("tags")
         return {
             **self.context,
+            "description": self.description,
             "category": self.category,
             "stakes": self.stakes,
             "confidence": self.confidence,
+            "tags": [str(t) for t in tags] if isinstance(tags, list) else [],
             "agent_id": agent_id,
         }
 

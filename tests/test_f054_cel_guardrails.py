@@ -469,6 +469,25 @@ async def test_dict_condition_on_unsent_context_field_is_unmet(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dict_condition_on_scope_is_unmet_when_not_sent(tmp_path):
+    """scope is a standard field, so it needs a default rather than has()."""
+    yaml_content = """
+- id: trader-only
+  description: CryptoTrader trading actions
+  condition:
+    scope: CryptoTrader
+    category: trading
+  action: block
+  message: Blocked
+"""
+    (tmp_path / "test.yaml").write_text(yaml_content, encoding="utf-8")
+
+    result = await evaluate_guardrails({"category": "trading"}, guardrails_dir=tmp_path)
+
+    assert result.allowed
+
+
+@pytest.mark.asyncio
 async def test_cel_runtime_error_in_warn_rule_warns(tmp_path):
     yaml_content = """
 - id: broken-warn
