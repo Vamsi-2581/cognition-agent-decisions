@@ -1435,8 +1435,17 @@ def _update_errors(updates: dict[str, Any]) -> list[str]:
         if isinstance(value, str) and len(value) > limit:
             errors.append(f"{key}: must be at most {limit} characters")
     for i, reason in enumerate(updates.get("reasons") or []):
-        if isinstance(reason, dict) and len(str(reason.get("text", ""))) > MAX_TEXT_CHARS:
+        if not isinstance(reason, dict):
+            continue
+        if len(str(reason.get("text", ""))) > MAX_TEXT_CHARS:
             errors.append(f"reasons[{i}].text: must be at most {MAX_TEXT_CHARS} characters")
+        # Reasons are stored as given, and SQLite's REAL column turns the
+        # string "1e999" into infinity.
+        if reason.get("strength") is not None:
+            try:
+                finite_float(reason["strength"], "strength")
+            except (TypeError, ValueError):
+                errors.append(f"reasons[{i}].strength: must be a finite number")
     return errors
 
 

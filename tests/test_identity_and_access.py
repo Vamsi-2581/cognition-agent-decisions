@@ -466,6 +466,18 @@ class TestNonFiniteNumbers:
         })
         assert response.error.code == INVALID_PARAMS
 
+    async def test_non_finite_reason_strength_is_rejected_on_update(self, dispatcher) -> None:
+        # SQLite's REAL column turns the string "1e999" into infinity.
+        decision_id = await _record(dispatcher, "alice")
+
+        response = await _call(dispatcher, "alice", "cstp.updateDecision", {
+            "id": decision_id,
+            "updates": {"reasons": [{"type": "analysis", "text": "r", "strength": "1e999"}]},
+        })
+
+        assert response.result["success"] is False
+        assert "strength" in response.result["error"]
+
     async def test_non_finite_link_weight_is_rejected(self, dispatcher) -> None:
         first = await _record(dispatcher, "alice")
         second = await _record(dispatcher, "alice")
