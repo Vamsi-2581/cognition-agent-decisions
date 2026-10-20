@@ -1,5 +1,6 @@
 """CSTP request/response models for JSON-RPC methods."""
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -829,8 +830,9 @@ class LinkDecisionsRequest:
             errors.append(
                 f"edgeType must be one of: {', '.join(sorted(_GRAPH_EDGE_TYPES))}"
             )
-        if self.weight <= 0:
-            errors.append("weight must be positive")
+        # float() accepts "inf"; a non-finite weight breaks every getGraph response.
+        if not math.isfinite(self.weight) or self.weight <= 0:
+            errors.append("weight must be a finite positive number")
         return errors
 
 

@@ -4,6 +4,7 @@ FastAPI-based server exposing CSTP methods via JSON-RPC 2.0
 and MCP tools via Streamable HTTP transport.
 """
 
+import json
 import logging
 import os
 import time
@@ -200,6 +201,11 @@ def create_app(config: Config | None = None) -> FastAPI:
     return app
 
 
+def _reject_constant(name: str) -> float:
+    """`json.loads` hook that refuses the NaN / Infinity / -Infinity literals."""
+    raise ValueError(f"{name} is not valid JSON")
+
+
 def _mount_mcp(app: FastAPI) -> None:
     """Mount the MCP Streamable HTTP handler at /mcp.
 
@@ -297,9 +303,11 @@ def _register_routes(app: FastAPI) -> None:
         Returns:
             JSON-RPC response.
         """
-        # Parse request body
+        # Parse request body. NaN and Infinity are not JSON, but json.loads
+        # accepts them; stored on a decision or graph edge they make every
+        # later response that includes it fail to serialize, for every agent.
         try:
-            body = await request.json()
+            body = json.loads(await request.body(), parse_constant=_reject_constant)
         except Exception:
             error_response = JsonRpcResponse.failure(
                 None,

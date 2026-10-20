@@ -5,6 +5,7 @@ Creates decision YAML files and indexes them to ChromaDB.
 
 import json
 import logging
+import math
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -23,6 +24,19 @@ from .vectordb.factory import get_vector_store
 DECISIONS_PATH = os.getenv("DECISIONS_PATH", "decisions")
 
 logger = logging.getLogger(__name__)
+
+
+def finite_float(value: Any, field_name: str) -> float:
+    """Coerce a caller-supplied number to float, rejecting NaN and infinity.
+
+    float() accepts "nan", "inf" and "1e999". A non-finite number stored on a
+    decision makes every later response that includes it fail to serialize,
+    for every agent.
+    """
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name}: must be a finite number")
+    return number
 
 
 def _restore_yaml(file_path: Any, original_bytes: bytes) -> str:
@@ -103,7 +117,7 @@ class Reason:
         return cls(
             type=data.get("type") or "analysis",
             text=data.get("text") or "",
-            strength=float(data.get("strength") or 0.8),
+            strength=finite_float(data.get("strength") or 0.8, "reasons[].strength"),
         )
 
 
@@ -227,7 +241,11 @@ class ReasoningStep:
             step=int(data.get("step") or 0),
             thought=data.get("thought") or "",
             output=data.get("output"),
-            confidence=float(data.get("confidence")) if data.get("confidence") is not None else None,
+            confidence=(
+                finite_float(data.get("confidence"), "trace[].confidence")
+                if data.get("confidence") is not None
+                else None
+            ),
             tags=data.get("tags") or [],
         )
 
@@ -454,7 +472,7 @@ class RelatedDecision:
         return cls(
             id=data.get("id") or "",
             summary=data.get("summary") or "",
-            distance=float(data.get("distance") or 0.0),
+            distance=finite_float(data.get("distance") or 0.0, "related_to[].distance"),
         )
 
 
@@ -522,7 +540,7 @@ class RecordDecisionRequest:
 
         return cls(
             decision=data.get("decision") or "",
-            confidence=float(data.get("confidence") or 0.5),
+            confidence=finite_float(data.get("confidence") or 0.5, "confidence"),
             category=data.get("category") or "process",
             stakes=data.get("stakes") or "medium",
             context=data.get("context"),

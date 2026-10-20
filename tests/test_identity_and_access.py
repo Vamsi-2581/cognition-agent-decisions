@@ -428,6 +428,61 @@ class TestGuardrailContext:
         assert [c["agent_id"] for c in outcomes] == ["alice"]
 
 
+class TestNonFiniteNumbers:
+    """One stored NaN or infinity made getDecision, listDecisions or getGraph
+    fail to serialize for every agent."""
+
+    def test_nan_literal_in_a_cstp_body_is_a_parse_error(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from a2a.server import create_app
+
+        with TestClient(create_app(_config())) as client:
+            response = client.post(
+                "/cstp",
+                content=b'{"jsonrpc": "2.0", "id": 1, "method": "cstp.recordDecision",'
+                b' "params": {"decision": "x", "confidence": 0.8, "category": "process",'
+                b' "reasons": [{"type": "analysis", "text": "t", "strength": Infinity}]}}',
+                headers={
+                    "Authorization": f"Bearer {TOKENS['alice']}",
+                    "Content-Type": "application/json",
+                },
+            )
+
+        assert response.json()["error"]["code"] == -32700
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"reasons": [{"type": "analysis", "text": "t", "strength": "inf"}]},
+            {"trace": [{"step": 1, "thought": "t", "confidence": "nan"}]},
+        ],
+    )
+    async def test_non_finite_strings_are_rejected_on_record(
+        self, dispatcher, params: dict[str, Any]
+    ) -> None:
+        response = await _call(dispatcher, "alice", "cstp.recordDecision", {
+            "decision": "Use SQLite", "confidence": 0.8, "category": "process", **params,
+        })
+        assert response.error.code == INVALID_PARAMS
+
+    async def test_non_finite_link_weight_is_rejected(self, dispatcher) -> None:
+        first = await _record(dispatcher, "alice")
+        second = await _record(dispatcher, "alice")
+
+        response = await _call(dispatcher, "alice", "cstp.linkDecisions", {
+            "sourceId": first, "targetId": second, "edgeType": "relates_to", "weight": "inf",
+        })
+
+        assert response.error.code == INVALID_PARAMS
+
+    def test_related_decision_distance_must_be_finite(self) -> None:
+        from a2a.cstp.decision_service import RelatedDecision
+
+        with pytest.raises(ValueError, match="finite"):
+            RelatedDecision.from_dict({"id": "abc", "distance": "-inf"})
+
+
 class TestQueryLimits:
     async def test_query_text_is_capped(self, dispatcher) -> None:
         response = await _call(dispatcher, "bob", "cstp.queryDecisions", {

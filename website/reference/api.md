@@ -72,7 +72,7 @@ A denied call returns error `-32009`; an MCP tool returns `{"error": "permission
 
 | Code | Name | Description |
 |------|------|-------------|
-| -32700 | Parse Error | Malformed JSON |
+| -32700 | Parse Error | Malformed JSON, including the non-standard `NaN` / `Infinity` literals |
 | -32600 | Invalid Request | Missing required fields |
 | -32601 | Method Not Found | Unknown CSTP method |
 | -32602 | Invalid Params | Parameter validation failed |
